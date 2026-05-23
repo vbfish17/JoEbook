@@ -18,7 +18,6 @@ async function pdfParse(fileBuffer: Buffer): Promise<{ text: string }> {
     throw new Error(`PDF 解析失败: ${err.message || err}`);
   }
 }
-import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
 
@@ -1963,6 +1962,7 @@ echo "=========================================================="`;
 // Vite server linkage for React dev server & build production serving
 const startExpress = async () => {
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa'
