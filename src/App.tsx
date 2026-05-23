@@ -146,7 +146,7 @@ const translations = {
     version: "v1.0.0",
     subTitle: "保留版式的本地文档智能翻译工具 (Bento Grid)",
     tagline: "全格式 (PDF, Word, PPTX, EPUB, MD) 本地无损翻译与排版对齐重建",
-    officialGemini: "内置 Gemini 官方接口支持",
+
     customApiTitle: "自定义及本地自建模型引擎 (Ollama / 兼容 API Preset)",
     customApiToggle: "启用第三方/本地运行 LLM 接口 (Ollama, DeepSeek 等)",
     modelSettings: "模型自定义参数与鉴权",
@@ -201,7 +201,7 @@ const translations = {
     version: "v1.0.0",
     subTitle: "Structure-Preserving Intelligent Document Translator (Bento Grid)",
     tagline: "Lossless layout-aligned translation for PDF, DOCX, PPTX, EPUB, and Markdown",
-    officialGemini: "Built-in Gemini provider support",
+
     customApiTitle: "Custom & Local Autonomy LLM Engines (Ollama / API Presets)",
     customApiToggle: "Enable Third-party / Local LLM Integration (Ollama, DeepSeek)",
     modelSettings: "Model Configuration & Credentials",
@@ -912,10 +912,14 @@ export default function App() {
     formData.append('file', file);
     
     try {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 120000);
       const response = await fetch('/api/parse-document', {
         method: 'POST',
-        body: formData
+        body: formData,
+        signal: controller.signal
       });
+      window.clearTimeout(timeoutId);
       
       if (!response.ok) {
         let errMsg = '';
@@ -994,7 +998,16 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Interactive parsing failed:', err);
-      setErrorMessage(err.message || '文本提取失败，请检查文件格式。');
+      const isAbort = err?.name === 'AbortError';
+      const fallbackMessage = currentLang === 'zh'
+        ? (isAbort
+            ? '解析请求超时。请稍后重试，或检查当前服务端端口 7050 是否可访问。'
+            : '解析请求失败。请检查服务端是否已启动、7050 端口是否可访问，或稍后重试。')
+        : (isAbort
+            ? 'Parse request timed out. Please retry, or verify that the server on port 7050 is reachable.'
+            : 'Parse request failed. Please verify that the server is running and port 7050 is reachable, then try again.');
+      const message = !err?.message || err.message === 'Failed to fetch' ? fallbackMessage : err.message;
+      setErrorMessage(message);
       setInteractiveStep('idle');
     }
   };
@@ -1521,7 +1534,11 @@ export default function App() {
       // Wait for polling to retrieve the file
     } catch (err: any) {
       console.error(err);
-      setErrorMessage(err.message || 'Error occurred. Please verify your custom endpoint settings.');
+      const fallbackMessage = currentLang === 'zh'
+        ? '请求失败。请检查服务是否已启动、端口是否可达（当前默认 7050），以及网络/接口配置是否正常。'
+        : 'Request failed. Please verify that the service is running, port 7050 is reachable, and your network/provider settings are correct.';
+      const message = !err?.message || err.message === 'Failed to fetch' ? fallbackMessage : err.message;
+      setErrorMessage(message);
       setIsTranslating(false);
       clearInterval(progressPollingRef.current);
       if (batchResolveRef.current) {
@@ -1703,19 +1720,6 @@ export default function App() {
         </div>
 
         <div className="flex items-center space-x-3 w-full sm:w-auto justify-between sm:justify-end">
-          {/* macOS Apple Silicon Release Version Info */}
-          <a 
-            href="/api/download-mac-kit"
-            id="download_mac_kit_header"
-            title={currentLang === 'zh' ? '获取适合 macOS 的 Apple Silicon M系列原生 DMG 打包发布套件' : 'Download native macOS DMG package suite for Apple Silicon M1-M4'}
-            className="flex items-center space-x-1.5 px-3 py-1.5 bg-indigo-950/40 hover:bg-indigo-900/40 text-indigo-300 hover:text-indigo-200 rounded-lg border border-indigo-900/40 text-xs font-semibold cursor-pointer transition-all"
-          >
-            <CpuIcon className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
-            <span className="hidden md:inline">{currentLang === 'zh' ? 'M系列 macOS 客户端 (.dmg)' : 'macOS App (.dmg)'}</span>
-            <span className="md:hidden">macOS App</span>
-            <Download className="w-3 h-3 text-indigo-400/80" />
-          </a>
-
           {/* Universal Bilingual Switcher Button */}
           <button 
             type="button"
@@ -2795,19 +2799,6 @@ export default function App() {
                   )}
                 </AnimatePresence>
 
-                {!useCustomApi && (
-                  <div className="p-4 rounded-xl bg-indigo-950/10 border border-indigo-900/30 text-xs text-indigo-300 space-y-2 mt-4">
-                    <h5 className="font-semibold flex items-center gap-1">
-                      <Cpu className="w-3.5 h-3.5" />
-                      {t.officialGemini}
-                    </h5>
-                    <p className="text-[11px] text-zinc-400 leading-normal">
-                      {currentLang === 'zh' 
-                        ? '官方免密钥托管加速启动，支持直接将多媒体文字无损排版输出，极力推荐普通用户使用。' 
-                        : 'Google Gemini accelerated route initialized. Fast cloud parallel processing with structure rendering fallback.'}
-                    </p>
-                  </div>
-                )}
               </div>
               <div className="mt-4 text-[10px] text-zinc-500 border-t border-zinc-800/40 pt-3">
                 {t.presetInfo}
