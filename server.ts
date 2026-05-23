@@ -43,6 +43,7 @@ async function fetchFontWithTimeout(url: string, timeoutMs = 2500): Promise<Buff
 
 const app = express();
 const PORT = 3000;
+// JoEbook server entry for local development and packaged desktop runtime.
 
 // Enable JSON and URL-encoded body parsing
 app.use(express.json({ limit: '500mb' }));

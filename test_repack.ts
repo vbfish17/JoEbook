@@ -3,6 +3,8 @@ import FormData from 'form-data';
 import fetch from 'node-fetch'; // using node-fetch internally installed by TSX or otherwise available
 import JSZip from 'jszip';
 
+// Local repack smoke test for JoEbook document packaging.
+
 async function generateDummyPptx() {
   const zip = new JSZip();
   // Add a 24MB file

@@ -1,6 +1,8 @@
 import JSZip from 'jszip';
 import fs from 'fs';
 
+// Local zip regeneration smoke test for JoEbook packaging flow.
+
 async function test() {
   console.log("Creating dummy zip with 24.9MB content...");
   const zip = new JSZip();

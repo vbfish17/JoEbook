@@ -3,6 +3,8 @@ import FormData from 'form-data';
 import fetch from 'node-fetch'; // wait, maybe not installed. Let's use http module
 import JSZip from 'jszip';
 
+// Local translation route smoke test for JoEbook.
+
 async function generateDummyPptx() {
   const zip = new JSZip();
   // Add a 24MB file
