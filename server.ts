@@ -41,7 +41,8 @@ async function fetchFontWithTimeout(url: string, timeoutMs = 2500): Promise<Buff
 }
 
 const app = express();
-const PORT = 3000;
+const DEFAULT_PORT = 7050;
+const PORT = Number(process.env.JOEBOOK_PORT || (process.env.NODE_ENV === 'production' ? process.env.PORT : DEFAULT_PORT) || DEFAULT_PORT);
 // JoEbook server entry for local development and packaged desktop runtime.
 
 // Enable JSON and URL-encoded body parsing
