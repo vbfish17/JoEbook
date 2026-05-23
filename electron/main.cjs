@@ -13,7 +13,7 @@ function startServer() {
   const env = { 
     ...process.env, 
     NODE_ENV: 'production',
-    PORT: '3000'
+    PORT: '7050'
   };
 
   console.log('Spawning JoEbook local background server:', serverPath);
@@ -40,13 +40,12 @@ function createWindow() {
     icon: path.join(__dirname, '..', 'public', 'favicon.ico')
   });
 
-  // Give local server a 1.5 seconds head start to bind to port 3000
+  // Give local server a head start to bind to port 7050
   setTimeout(() => {
-    mainWindow.loadURL('http://localhost:3000').catch((err) => {
+    mainWindow.loadURL('http://127.0.0.1:7050').catch((err) => {
       console.warn('Initial connection failed, retrying...', err);
-      // Wait another second and try one more time
       setTimeout(() => {
-        mainWindow.loadURL('http://localhost:3000');
+        mainWindow.loadURL('http://127.0.0.1:7050');
       }, 1500);
     });
   }, 1500);
