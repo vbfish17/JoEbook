@@ -70,7 +70,7 @@ In traditional document translation scenarios, we constantly face broken formatt
 1. **Requirements**: Node.js v18.0.0+
 2. **Clone repo**: `git clone https://github.com/vbfish17/JoEbook.git && cd JoEbook`
 3. **Install dependencies**: `npm install`
-4. **Start Development Server**: `npm run dev` (Access at `http://localhost:3000`)
+4. **Start Development Server**: `npm run dev` (Access at `http://localhost:7050`)
 5. **Production Build**: `npm run build` & `npm run start` (Bundled automatically for backend server deployment)
 
 ---
