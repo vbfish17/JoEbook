@@ -30,6 +30,7 @@ npm install --include=dev
 
 # 2. 开启开发模式
 npm run dev
+# default local URL: http://localhost:7050
 
 # 3. 构建发布版本
 npm run build
@@ -90,6 +91,7 @@ npm install --include=dev
 
 # 2. Start development mode
 npm run dev
+# default local URL: http://localhost:7050
 
 # 3. Build production assets
 npm run build
