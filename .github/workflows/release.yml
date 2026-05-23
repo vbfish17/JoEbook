@@ -1,0 +1,48 @@
+name: Build and Release JoEbook
+
+on:
+  push:
+    tags:
+      - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
+
+jobs:
+  build:
+    name: Build & Release on Mac and Windows
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Build and Distribute
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "$RUNNER_OS" == "macOS" ]; then
+            npm run dist:mac
+          else
+            npm run dist:win
+          fi
+        shell: bash
+
+      - name: Release Packages
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            dist-desktop/*.dmg
+            dist-desktop/*.exe
+            dist-desktop/*.zip
+            dist-desktop/*.blockmap
+          generate_release_notes: true
