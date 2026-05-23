@@ -24,7 +24,7 @@ async function startClient() {
   form.append('targetLang', 'zh');
   form.append('sourceLang', 'en');
   
-  const response = await fetch('http://localhost:3000/api/translate', {
+  const response = await fetch('http://127.0.0.1:7050/api/translate', {
     method: 'POST',
     body: form
   });
