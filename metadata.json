@@ -1,6 +1,6 @@
 {
   "name": "JoEbook",
-  "description": "JoEbook is a high-fidelity structure-preserving document translator created by Jooseed.",
+  "description": "JoEbook is a structure-preserving document translation workspace for long-form documents and bilingual review.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

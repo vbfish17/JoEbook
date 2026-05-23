@@ -1,11 +1,13 @@
 {
-  "name": "react-example",
-  "private": true,
+  "name": "joebook",
+  "private": false,
   "version": "1.0.0",
+  "description": "JoEbook is a structure-preserving document translation workspace for PDF, DOCX, PPTX, EPUB, Markdown, and other long-form documents.",
   "repository": {
     "type": "git",
     "url": "https://github.com/vbfish17/JoEbook.git"
   },
+  "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
@@ -18,8 +20,8 @@
     "dist:win": "npm run build && electron-builder --win nsis"
   },
   "build": {
-    "appId": "com.joebook.workstation",
-    "productName": "JoEbook Workstation",
+    "appId": "com.joebook.app",
+    "productName": "JoEbook",
     "directories": {
       "output": "dist-desktop"
     },
@@ -42,11 +44,13 @@
     "@vitejs/plugin-react": "^5.0.4",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
+    "form-data": "^4.0.5",
     "idb-keyval": "^6.2.4",
     "jszip": "^3.10.1",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "multer": "^2.1.1",
+    "node-fetch": "^3.3.2",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
     "react": "^19.0.1",

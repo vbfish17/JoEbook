@@ -143,10 +143,10 @@ const llmPresets: LlmPreset[] = [
 const translations = {
   zh: {
     title: "JoEbook",
-    version: "v3.2.0",
+    version: "v1.0.0",
     subTitle: "保留版式的本地文档智能翻译工具 (Bento Grid)",
     tagline: "全格式 (PDF, Word, PPTX, EPUB, MD) 本地无损翻译与排版对齐重建",
-    officialGemini: "内置官方推荐 Gemini 3.5 自动化托管加速",
+    officialGemini: "内置 Gemini 官方接口支持",
     customApiTitle: "自定义及本地自建模型引擎 (Ollama / 兼容 API Preset)",
     customApiToggle: "启用第三方/本地运行 LLM 接口 (Ollama, DeepSeek 等)",
     modelSettings: "模型自定义参数与鉴权",
@@ -182,7 +182,7 @@ const translations = {
     historyTitle: "本地翻译运行日志 / Cache Logs",
     clearHistory: "清空历史缓存",
     noHistory: "暂无历史记录。已译文件将缓存于下方以便快速调用。",
-    footerText: "JoEbook © 2026 Jooseed Tech (info@jooseed.com). 基于底阶 ZIP/XML 分析引擎保证视觉精美对齐。",
+    footerText: "JoEbook © 2026. 保留版式翻译与双语校对工作台。",
     documentation: "格式保留原理",
     howItWorksText: "对于 Office 及 Epub 文件，系统利用 ZIP 归档将底层 XML/HTML 段落提取出，翻译后重写写入原格式元位置，确保原有配图、大卡幻灯片和公式完全不受任何损毁。",
     macTitle: "macOS (Apple Silicon M系列) DMG 桌面端打包构建套件",
@@ -198,10 +198,10 @@ const translations = {
   },
   en: {
     title: "JoEbook",
-    version: "v3.2.0",
+    version: "v1.0.0",
     subTitle: "Structure-Preserving Intelligent Document Translator (Bento Grid)",
     tagline: "Lossless layout-aligned translation for PDF, DOCX, PPTX, EPUB, and Markdown",
-    officialGemini: "Built-in Recommended Gemini 3.5 Hosted Speed Accelerator",
+    officialGemini: "Built-in Gemini provider support",
     customApiTitle: "Custom & Local Autonomy LLM Engines (Ollama / API Presets)",
     customApiToggle: "Enable Third-party / Local LLM Integration (Ollama, DeepSeek)",
     modelSettings: "Model Configuration & Credentials",
@@ -237,7 +237,7 @@ const translations = {
     historyTitle: "Bilingual Operations Local Logs",
     clearHistory: "Flush Local Caches",
     noHistory: "No cached records found. Export history registers below for rapid retrieval.",
-    footerText: "JoEbook © 2026 Jooseed Tech (info@jooseed.com). Layout integrity preserved with lower-level zip architecture.",
+    footerText: "JoEbook © 2026. Structure-preserving translation and bilingual review workspace.",
     documentation: "Integrity Restoration Doctrine",
     howItWorksText: "For digital documents, our core parser unzips raw assets, replaces raw XML content nodes concurrently with target text segments, and repacks without touching layout spacing or pictures.",
     macTitle: "macOS (Apple Silicon M-Series) Native DMG Compiling Suite",
@@ -420,7 +420,7 @@ export default function App() {
   const [confirmExit, setConfirmExit] = useState<boolean>(false);
   const [showRepackConfirm, setShowRepackConfirm] = useState<boolean>(false);
 
-  // DocuTranslate Optimization: Find and Replace & Multi-sub view tabs
+  // JoEbook editor utilities: find and replace across the bilingual workspace
   const [findQuery, setFindQuery] = useState<string>('');
   const [replaceQuery, setReplaceQuery] = useState<string>('');
   const [workspaceSubView, setWorkspaceSubView] = useState<'editor' | 'preview'>('editor');
@@ -1331,7 +1331,7 @@ export default function App() {
     }
   };
 
-  // DocuTranslate Optimization: Batch find and replace across all translated blocks
+  // JoEbook editor utility: batch find and replace across translated blocks
   const handleGlobalReplace = () => {
     if (!findQuery) return;
     let count = 0;
@@ -1366,7 +1366,7 @@ export default function App() {
     setReplaceQuery('');
   };
 
-  // DocuTranslate Optimization: Call background service to polish a single paragraph
+  // JoEbook editor utility: call background service to polish a single paragraph
   const handleSingleParaPolish = async (idx: number, style: string) => {
     if (blockStatuses[idx] === 'pending' || blockStatuses[idx] === 'translating') return;
     setPolishBlockIdx(idx);
@@ -1729,7 +1729,7 @@ export default function App() {
 
           <div className="flex items-center space-x-2 px-3 py-1.5 bg-emerald-950 text-emerald-400 rounded-lg border border-emerald-900/50 text-xs font-medium">
             <div className="w-2 h-2 bg-emerald-500 rounded-full animate-ping"></div>
-            <span>{useCustomApi ? `${customApi.model || 'API'}` : 'Gemini 3.5 Ready'}</span>
+            <span>{useCustomApi ? `${customApi.model || 'API'}` : 'Gemini Ready'}</span>
           </div>
 
           <button 
@@ -2552,7 +2552,7 @@ export default function App() {
 
           <div className="mt-4 pt-4 border-t border-zinc-800/60 text-[11px] text-zinc-500 flex items-center justify-between">
             <span>PDF: High precision • DOCX / PPTX: Block-aligned rebuilds</span>
-            <span>v3.2.0</span>
+            <span>v1.0.0</span>
           </div>
         </div>
 
@@ -2601,7 +2601,7 @@ export default function App() {
                           className={`p-2 rounded-lg text-left text-[11px] border transition-all cursor-pointer ${isActive ? 'bg-indigo-950/60 border-indigo-500 text-indigo-200 ring-1 ring-indigo-500/20' : 'bg-zinc-950/40 border-zinc-800 hover:border-zinc-750 text-zinc-300'}`}
                         >
                           <div className="font-semibold flex items-center justify-between">
-                            <span className="truncate">{preset.id === 'gemini' ? 'Gemini 3.5' : preset.name.split(' (')[0]}</span>
+                            <span className="truncate">{preset.id === 'gemini' ? 'Gemini' : preset.name.split(' (')[0]}</span>
                             <div className={`w-1.5 h-1.5 rounded-full ${isActive ? 'bg-indigo-400 animate-pulse' : 'bg-zinc-700'}`} />
                           </div>
                           <p className="text-[9px] text-zinc-500 line-clamp-1 mt-0.5">

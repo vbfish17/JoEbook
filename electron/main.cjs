@@ -32,7 +32,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1366,
     height: 900,
-    title: 'JoEbook Workstation (Elite Desktop)',
+    title: 'JoEbook',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
