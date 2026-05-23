@@ -23,7 +23,7 @@ async function startClient() {
   form.append('targetLang', 'zh');
   form.append('file', fileBuffer, { filename: 'test.pptx', contentType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' });
   
-  const response = await fetch('http://localhost:3000/api/repack-document', {
+  const response = await fetch('http://127.0.0.1:7050/api/repack-document', {
     method: 'POST',
     body: form
   });
