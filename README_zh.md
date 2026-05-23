@@ -70,7 +70,7 @@
 1. **安装环境**：Node.js v18.0.0+ 
 2. **下载代码**：`git clone https://github.com/vbfish17/JoEbook.git && cd JoEbook`
 3. **依赖安装**：`npm install`
-4. **启动开发**：`npm run dev` （在浏览器访问 `http://localhost:3000`）
+4. **启动开发**：`npm run dev` （在浏览器访问 `http://localhost:7050`）
 5. **部署发布**：`npm run build` & `npm run start` （自带全量化打包流程配置，直接出产服务端部署包）
 
 ---
