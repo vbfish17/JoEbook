@@ -121,11 +121,11 @@ const llmPresets: LlmPreset[] = [
     id: 'lmstudio',
     name: 'LM Studio',
     baseUrl: 'http://localhost:1234/v1',
-    defaultModel: 'qwen2.5-7b-instruct',
+    defaultModel: 'mlx-community/translategemma-4b-it-4bit_immersive-translate',
     hasCustomKey: false,
     requiredKeyPlaceholder: '无需密钥 (Optional)',
-    descriptionZh: '本地 LM Studio 图形化加载通道',
-    descriptionEn: 'Local GGUF models running in LM Studio app'
+    descriptionZh: '本地 LM Studio 图形化加载通道，优先适配 TranslateGemma 翻译模型',
+    descriptionEn: 'Local GGUF / MLX translation models in LM Studio, optimized for TranslateGemma'
   },
   {
     id: 'custom',
@@ -370,7 +370,7 @@ export default function App() {
       deepseek: { apiKey: '', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
       qwen: { apiKey: '', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
       ollama: { apiKey: 'not-required', baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5:7b' },
-      lmstudio: { apiKey: 'not-required', baseUrl: 'http://localhost:1234/v1', model: 'qwen2.5-7b-instruct' },
+      lmstudio: { apiKey: 'not-required', baseUrl: 'http://localhost:1234/v1', model: 'mlx-community/translategemma-4b-it-4bit_immersive-translate' },
       custom: { apiKey: '', baseUrl: '', model: '' }
     };
   });

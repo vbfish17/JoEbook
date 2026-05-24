@@ -1,9 +1,98 @@
 import express from 'express';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import multer from 'multer';
 import JSZip from 'jszip';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit/dist/fontkit.umd.js';
 import { PDFParse } from 'pdf-parse';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
+const PDF2ZH_PYTHON = '/Users/lian/miniforge3/bin/python3';
+const PDF2ZH_SCRIPT = path.resolve(process.cwd(), 'scripts/pdf_translate_via_pdf2zh.py');
+
+type CustomApiConfig = { apiKey?: string; baseUrl?: string; model?: string };
+
+function normalizePdf2zhLang(value: string | undefined): string {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text || text === 'auto') return 'en';
+  if (text === 'english' || text === 'en') return 'en';
+  if (text === 'chinese' || text === 'chinese (simplified)' || text === 'chinese (traditional)' || text === 'zh') return 'zh';
+  if (text === 'japanese' || text === 'ja') return 'ja';
+  if (text === 'korean' || text === 'ko') return 'ko';
+  return value || 'en';
+}
+
+function canUsePdf2zh(customApi?: CustomApiConfig): boolean {
+  return !!(customApi?.baseUrl && customApi?.model);
+}
+
+async function translatePdfViaPdf2zh(
+  fileBuffer: Buffer,
+  progress: (msg: string) => void,
+  customApi: CustomApiConfig,
+  sourceLang: string | undefined,
+  targetLang: string
+): Promise<{ docxBuffer: Buffer; pdfBuffer: Buffer; textContent: string }> {
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'joebook-pdf2zh-'));
+  const inputPath = path.join(tempDir, 'input.pdf');
+  const outputPdfPath = path.join(tempDir, 'translated.pdf');
+  const outputDualPdfPath = path.join(tempDir, 'translated-dual.pdf');
+  const outputTextPath = path.join(tempDir, 'translated.txt');
+  const jsonOutPath = path.join(tempDir, 'result.json');
+
+  try {
+    await fs.promises.writeFile(inputPath, fileBuffer);
+    progress('已切换到 PDFMathTranslate 高保真 PDF 引擎...');
+
+    const args = [
+      PDF2ZH_SCRIPT,
+      '--input', inputPath,
+      '--lang-in', normalizePdf2zhLang(sourceLang),
+      '--lang-out', normalizePdf2zhLang(targetLang),
+      '--base-url', String(customApi.baseUrl || '').trim(),
+      '--model', String(customApi.model || '').trim(),
+      '--api-key', customApi.apiKey || 'not-required',
+      '--output-pdf', outputPdfPath,
+      '--output-dual-pdf', outputDualPdfPath,
+      '--output-text', outputTextPath,
+      '--json-out', jsonOutPath,
+    ];
+
+    const { stdout, stderr } = await execFileAsync(PDF2ZH_PYTHON, args, {
+      cwd: process.cwd(),
+      maxBuffer: 20 * 1024 * 1024,
+    });
+
+    if (stderr?.trim()) {
+      console.warn('[pdf2zh stderr]', stderr.trim());
+    }
+    if (stdout?.trim()) {
+      console.log('[pdf2zh stdout]', stdout.trim());
+    }
+
+    const [pdfBuffer, textContent, jsonText] = await Promise.all([
+      fs.promises.readFile(outputPdfPath),
+      fs.promises.readFile(outputTextPath, 'utf8'),
+      fs.promises.readFile(jsonOutPath, 'utf8'),
+    ]);
+
+    const meta = JSON.parse(jsonText);
+    console.log('[pdf2zh result]', meta);
+    progress(`PDFMathTranslate 输出完成：${meta.pdf_size || pdfBuffer.length} bytes，文本 ${meta.text_chars || textContent.length} 字符。`);
+
+    return {
+      docxBuffer: Buffer.from(textContent, 'utf8'),
+      pdfBuffer,
+      textContent,
+    };
+  } finally {
+    await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
 
 async function pdfParse(fileBuffer: Buffer): Promise<{ text: string }> {
   try {
@@ -24,6 +113,20 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const pdfFontCache: Record<string, Buffer> = {};
+const pdfFontCandidates = {
+  cjk: [
+    '/System/Library/Fonts/Supplemental/Arial Unicode.ttf'
+  ],
+  zh: [
+    '/System/Library/Fonts/Supplemental/Arial Unicode.ttf'
+  ],
+  ja: [
+    '/System/Library/Fonts/Supplemental/Arial Unicode.ttf'
+  ],
+  ko: [
+    '/System/Library/Fonts/Supplemental/Arial Unicode.ttf'
+  ]
+} as const;
 
 async function fetchFontWithTimeout(url: string, timeoutMs = 2500): Promise<Buffer> {
   const controller = new AbortController();
@@ -38,6 +141,172 @@ async function fetchFontWithTimeout(url: string, timeoutMs = 2500): Promise<Buff
     clearTimeout(id);
     throw err;
   }
+}
+
+function resolvePdfFontCandidates(targetLang: string): string[] {
+  const lang = String(targetLang || '').toLowerCase();
+  if (lang.includes('zh') || lang.includes('cn') || lang.includes('chinese')) return [...pdfFontCandidates.zh];
+  if (lang.includes('ja') || lang.includes('jp') || lang.includes('japanese')) return [...pdfFontCandidates.ja];
+  if (lang.includes('ko') || lang.includes('korean')) return [...pdfFontCandidates.ko];
+  if (/[\u3400-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/.test(targetLang)) return [...pdfFontCandidates.cjk];
+  return [];
+}
+
+async function loadLocalPdfFontBuffer(targetLang: string): Promise<Buffer | null> {
+  const candidates = resolvePdfFontCandidates(targetLang);
+  console.log('[PDF font] candidate paths', { targetLang, candidates });
+  for (const fontPath of candidates) {
+    try {
+      if (!pdfFontCache[fontPath]) {
+        const buffer = await fs.promises.readFile(fontPath);
+        pdfFontCache[fontPath] = buffer;
+        console.log('[PDF font] read success', { fontPath, size: buffer.length });
+      }
+      return pdfFontCache[fontPath];
+    } catch (err: any) {
+      console.warn('[PDF font] read failed', { fontPath, message: err?.message || String(err) });
+      continue;
+    }
+  }
+  return null;
+}
+
+function containsCjk(text: string): boolean {
+  return /[\u3400-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/.test(text);
+}
+
+function tokenizeForHybridWrap(text: string): string[] {
+  return text.match(/[\u3400-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]|[^\s\u3400-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]+|\s+/g) || [];
+}
+
+function safeMeasureText(font: any, text: string, fontSize: number): number {
+  try {
+    return font.widthOfTextAtSize(text, fontSize);
+  } catch {
+    if (containsCjk(text)) return text.length * fontSize * 0.92;
+    return text.length * fontSize * 0.52;
+  }
+}
+
+function wrapHybridText(text: string, font: any, fontSize: number, maxWidth: number): string[] {
+  const paragraphs = text.split(/\n+/);
+  const wrapped: string[] = [];
+
+  for (const paragraph of paragraphs) {
+    const trimmed = paragraph.trim();
+    if (!trimmed) {
+      wrapped.push('');
+      continue;
+    }
+
+    const tokens = tokenizeForHybridWrap(trimmed);
+    let currentLine = '';
+
+    for (const token of tokens) {
+      const candidate = currentLine ? `${currentLine}${token}` : token;
+      const candidateWidth = safeMeasureText(font, candidate, fontSize);
+
+      if (candidateWidth <= maxWidth) {
+        currentLine = candidate;
+        continue;
+      }
+
+      if (currentLine.trim()) {
+        wrapped.push(currentLine.trimEnd());
+      }
+
+      const tokenWidth = safeMeasureText(font, token, fontSize);
+      if (tokenWidth <= maxWidth) {
+        currentLine = token.trimStart();
+        continue;
+      }
+
+      let chunk = '';
+      for (const ch of token) {
+        const nextChunk = `${chunk}${ch}`;
+        if (safeMeasureText(font, nextChunk, fontSize) > maxWidth && chunk) {
+          wrapped.push(chunk);
+          chunk = ch;
+        } else {
+          chunk = nextChunk;
+        }
+      }
+      currentLine = chunk;
+    }
+
+    if (currentLine.trim()) {
+      wrapped.push(currentLine.trimEnd());
+    }
+  }
+
+  return wrapped;
+}
+
+function addPdfPage(pdfDoc: PDFDocument, pageNumber: number, font: any, fallbackFont?: any) {
+  const page = pdfDoc.addPage([595.276, 841.89]);
+  const { height } = page.getSize();
+  const headerText = `JoEbook Translation Output · Page ${pageNumber}`;
+  try {
+    page.drawText(headerText, {
+      x: 50,
+      y: height - 32,
+      size: 8,
+      font,
+      color: rgb(0.45, 0.45, 0.45)
+    });
+  } catch {
+    page.drawText(headerText.replace(/[^\x00-\x7F]/g, '?'), {
+      x: 50,
+      y: height - 32,
+      size: 8,
+      font: fallbackFont || font,
+      color: rgb(0.45, 0.45, 0.45)
+    });
+  }
+  return page;
+}
+
+function drawWrappedBlock(
+  pdfDoc: PDFDocument,
+  page: any,
+  lines: string[],
+  state: { y: number; pageNumber: number },
+  font: any,
+  fontSize: number,
+  lineHeight: number,
+  topY: number,
+  bottomMargin: number,
+  fallbackFont?: any
+) {
+  let currentPage = page;
+  for (const line of lines) {
+    if (state.y < bottomMargin) {
+      state.pageNumber += 1;
+      currentPage = addPdfPage(pdfDoc, state.pageNumber, font);
+      state.y = topY;
+    }
+    try {
+      currentPage.drawText(line || ' ', {
+        x: 50,
+        y: state.y,
+        size: fontSize,
+        font,
+        color: rgb(0.1, 0.1, 0.1)
+      });
+    } catch (err) {
+      if (!fallbackFont) throw err;
+      const sanitized = (line || ' ').replace(/[^\x00-\x7F]/g, '?');
+      currentPage.drawText(sanitized || ' ', {
+        x: 50,
+        y: state.y,
+        size: fontSize,
+        font: fallbackFont,
+        color: rgb(0.1, 0.1, 0.1)
+      });
+    }
+    state.y -= lineHeight;
+  }
+  return currentPage;
 }
 
 const app = express();
@@ -156,8 +425,15 @@ export async function translateTextBatch(
   isRecursive = false
 ): Promise<string[]> {
   const sourceText = sourceLang === 'Auto' ? 'auto-detected language' : sourceLang;
-  
-  const systemInstruction = `You are a professional bilingually-fluent document translator. 
+  const normalizedModel = (customApi?.model || '').toLowerCase();
+  const normalizedBaseUrl = (customApi?.baseUrl || '').toLowerCase();
+  const isLmStudio = normalizedBaseUrl.includes('localhost:1234') || normalizedBaseUrl.includes('127.0.0.1:1234') || normalizedBaseUrl.includes('lmstudio');
+  const isTranslateGemma = normalizedModel.includes('translategemma');
+  const useTranslateGemmaMode = isLmStudio && isTranslateGemma;
+
+  const systemInstruction = useTranslateGemmaMode
+    ? ''
+    : `You are a professional bilingually-fluent document translator. 
 Your primary task is to translate an array of text segments from "${sourceText}" to "${targetLang}".
 Always maintain a "${tone}" tone, natural expression, correct style, and exact formatting placeholders.
 
@@ -167,6 +443,18 @@ CRITICAL RULES:
 3. Keep all technical terms, markup tags, HTML sub-elements, inline style tokens, variables, or braces (e.g. {1}) exactly as they are. Translate only the surrounding natural text.
 4. If a block consists entirely of numbers, code syntax, empty spaces, or placeholder characters, return it unchanged.
 5. Return ONLY the JSON response - do not decorate it with markdown codeblocks or other chat text.`;
+
+  const buildTranslateGemmaPrompt = (text: string) => `<<<source>>>${sourceText}<<<target>>>${targetLang}<<<text>>>${text}`;
+
+  const parseTranslateGemmaBatch = (content: string): string[] => {
+    const cleaned = content.trim().replace(/^```[a-zA-Z]*\s*/i, '').replace(/\s*```$/i, '').trim();
+    const segments = cleaned
+      .split(/\n\s*<<<end>>>\s*\n|\n\s*---\s*\n|\n{2,}/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    if (segments.length === texts.length) return segments;
+    return [cleaned];
+  };
 
   // Detect if we should use official Google GenAI SDK for custom API integrations (rather than general OpenAI completions middleware)
   let useOfficialGoogleSdkForCustomKey = false;
@@ -241,6 +529,53 @@ CRITICAL RULES:
       const model = customApi.model || 'gpt-3.5-turbo';
       
       results = await retryWithBackoff(async () => {
+        if (useTranslateGemmaMode) {
+          console.log('[TranslateGemma] mode ON', { model, baseUrl, count: texts.length, sourceText, targetLang });
+          const translatedResults: string[] = [];
+          for (const text of texts) {
+            const promptText = `Translate strictly and return only the final translation with no explanation. ${buildTranslateGemmaPrompt(text)}`;
+            const bodyObj = {
+              model,
+              messages: [
+                {
+                  role: 'user',
+                  content: promptText
+                }
+              ],
+              temperature: 0,
+              max_tokens: 512
+            };
+
+            console.log('[TranslateGemma] request text', text);
+            const response = await fetch(`${baseUrl}/chat/completions`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${customApi?.apiKey}`
+              },
+              body: JSON.stringify(bodyObj)
+            });
+
+            if (!response.ok) {
+              throw new Error(`TranslateGemma API returned status ${response.status}: ${await response.text()}`);
+            }
+
+            const result = await response.json();
+            const content = result.choices?.[0]?.message?.content || result.choices?.[0]?.text || '';
+            console.log('[TranslateGemma] raw content', content);
+            if (!content) {
+              translatedResults.push(text);
+              continue;
+            }
+            const parsed = parseTranslateGemmaBatch(content);
+            const finalText = (parsed[0] || content).trim();
+            console.log('[TranslateGemma] final text', finalText);
+            translatedResults.push(finalText);
+          }
+          console.log('[TranslateGemma] translatedResults', translatedResults);
+          return translatedResults;
+        }
+
         const prompt = `Translate the following text items. \nInput items list (JSON formatted):\n${JSON.stringify({ paragraphs: texts }, null, 2)}\n\nReturn a JSON with the key "translations" containing the array of translations in the exact same sequence. No explanations and no Markdown blocks.`;
 
         const makeRequest = async (includeJsonFormat: boolean) => {
@@ -267,7 +602,6 @@ CRITICAL RULES:
 
         let response = await makeRequest(true);
         
-        // Fallback if the raw API endpoint does not support response_format: json_object
         if (!response.ok && (response.status === 400 || response.status === 422)) {
           console.warn("Attempting custom API call fallback without response_format json_object...");
           response = await makeRequest(false);
@@ -283,7 +617,6 @@ CRITICAL RULES:
           throw new Error('Received empty content response from custom LLM.');
         }
 
-        // High fidelity parsing function
         const parseFlexibleJson = (str: string): any => {
           let clean = str.trim();
           clean = clean.replace(/^```json\s*/i, '').replace(/\s*```$/, '').trim();
@@ -947,193 +1280,93 @@ async function translatePdf(
   progress(`正在读取并解析 PDF 文本排版数据...`);
   const data = await pdfParse(fileBuffer);
   const fullText = data.text;
-  
-  // PDF divides pages with \f
+
   const pages = fullText.split('\f').map(p => p.trim()).filter(p => p.length > 0);
   progress(`PDF 成功被解构为 ${pages.length} 页独立内容.`);
-  
-  // Gather all lines across all pages with layout coordinates
+
   const pList: { text: string; pageIdx: number }[] = [];
   for (let pIdx = 0; pIdx < pages.length; pIdx++) {
-    const pText = pages[pIdx];
-    const paragraphs = reconstructParagraphs(pText);
-    paragraphs.forEach((txt) => {
-      pList.push({
-        text: txt,
-        pageIdx: pIdx
-      });
-    });
+    const pageParagraphs = reconstructParagraphs(pages[pIdx]);
+    for (const txt of pageParagraphs) {
+      if (txt.trim()) {
+        pList.push({ text: txt, pageIdx: pIdx });
+      }
+    }
   }
 
   progress(`过滤提取出共有 ${pList.length} 个待排版翻译的有效文本块...`);
-
-  // Translate with concurrency pool helper
   const pListWithIdx = pList.map((item, idx) => ({ originIdx: idx, text: item.text }));
   const translations = await batchTranslateWithConcurrency(pListWithIdx, translateFn, progress, customApi, "PDF段落");
+  console.log('[translatePdf] pList sample', pList.slice(0, 5));
+  console.log('[translatePdf] translations sample', translations.slice(0, 5));
 
-  // Re-assemble translated pages
   const translatedPages: string[] = [];
   for (let pIdx = 0; pIdx < pages.length; pIdx++) {
     const pageLines: string[] = [];
     pList.forEach((item, idx) => {
       if (item.pageIdx === pIdx) {
-        pageLines.push(translations[idx]);
+        const translated = (translations[idx] || '').trim();
+        pageLines.push(translated || item.text);
       }
     });
-
-    if (pageLines.length === 0) {
-      translatedPages.push('');
-    } else {
-      translatedPages.push(pageLines.join('\n\n'));
-    }
+    translatedPages.push(pageLines.join('\n\n'));
   }
-  
+
   const fullTranslatedContent = translatedPages.join('\n\n---\n\n');
-  
-  // Generating a beautiful, elegant PDF using pdf-lib (Helvetica standard PDF)
+
   progress(`构建双栏版面高保真对照 PDF 工作面...`);
   const pdfDoc = await PDFDocument.create();
-  
-  let baseFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  let baseBoldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  
+  pdfDoc.registerFontkit(fontkit as any);
+
+  const fallbackFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const fallbackBoldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+
   let customFont: any = null;
-  const targetLangLower = String(targetLang).toLowerCase();
-  let fontUrl = '';
-  if (targetLangLower.includes('zh') || targetLangLower.includes('cn')) {
-    fontUrl = 'https://fonts.gstatic.com/s/zcoolxiaowei/v12/6N0b8dq8aP77n-VnK-m-v3Y9N18H.ttf';
-  } else if (targetLangLower.includes('ja')) {
-    fontUrl = 'https://fonts.gstatic.com/s/sawarobigothic/v15/N0bU2yp7F3V4yD4Z7q_b4gN8N0E.ttf';
-  } else if (targetLangLower.includes('ko')) {
-    fontUrl = 'https://fonts.gstatic.com/s/nanumpenscript/v23/34003z-OAdqO8Vp6_PFvO_18MD1A.ttf';
-  }
-
-  if (fontUrl) {
-    progress(`正在加载语言专属字形排版包...`);
-    try {
-      let fontBuffer = pdfFontCache[fontUrl];
-      if (!fontBuffer) {
-        fontBuffer = await fetchFontWithTimeout(fontUrl, 4000);
-        pdfFontCache[fontUrl] = fontBuffer;
-      }
-      customFont = await pdfDoc.embedFont(fontBuffer);
-      progress(`字形排版包加载成功，已成功注入矢量绘图引擎。`);
-    } catch (e: any) {
-      console.warn(`[Font fetch failed] Fallback to system font:`, e.message);
+  try {
+    const localFontBuffer = await loadLocalPdfFontBuffer(targetLang);
+    if (localFontBuffer) {
+      customFont = await pdfDoc.embedFont(localFontBuffer, { subset: true });
+      console.log('[PDF font] custom font loaded', { targetLang, hasCustomFont: !!customFont });
+      progress(`本地高保真字体加载成功，已启用 CJK 矢量字形嵌入。`);
+    } else {
+      progress(`未找到合适的本地 CJK 字体，将退回基础字体输出。`);
     }
+  } catch (e: any) {
+    console.warn('[PDF font load failed]', e?.message || e);
+    progress(`本地高保真字体加载失败，将退回基础字体输出。`);
   }
 
-  const font = customFont || baseFont;
-  const boldFont = customFont || baseBoldFont;
-  
+  const font = customFont || fallbackFont;
+  const boldFont = customFont || fallbackBoldFont;
+  const topY = 790;
+  const bottomMargin = 55;
+  const maxWidth = 595.276 - 100;
+
+  let pageNumber = 1;
+  let page = addPdfPage(pdfDoc, pageNumber, font);
+  const state = { y: topY, pageNumber };
+
   for (let pIdx = 0; pIdx < translatedPages.length; pIdx++) {
     const pageText = translatedPages[pIdx].trim();
-    if (pageText.length === 0) continue;
-    
-    let pageObj = pdfDoc.addPage([595.276, 841.890]); // Standard A4 (595 x 841)
-    const { width, height } = pageObj.getSize();
-    
-    // Header
-    pageObj.drawText(`Document Translation File - Page ${pIdx + 1}`, {
-      x: 50,
-      y: height - 40,
-      size: 8,
-      font: font,
-      color: rgb(0.5, 0.5, 0.5)
-    });
+    if (!pageText) continue;
 
-    // Check for East Asian/non-ASCII characters to print a clean warning banner ONCE per page
-    const hasUnicode = /[^\x00-\x7F]/.test(pageText);
-    if (hasUnicode && !customFont) {
-      pageObj.drawText("Bilingual Workspace Alert", {
-        x: 50,
-        y: height - 52,
-        size: 7,
-        font: boldFont,
-        color: rgb(0.9, 0.4, 0.1)
-      });
-      pageObj.drawText("Standard PDF readers do not embed localized system fonts. Download high-fidelity Word (.docx) on right panel for native vector font output.", {
-        x: 130,
-        y: height - 52,
-        size: 6,
-        font: font,
-        color: rgb(0.4, 0.4, 0.4)
-      });
+    const headerLines = wrapHybridText(`PDF Translation · Source Page ${pIdx + 1}`, boldFont, 11, maxWidth);
+    page = drawWrappedBlock(pdfDoc, page, headerLines, state, boldFont, 11, 16, topY, bottomMargin);
+    state.y -= 4;
+
+    const paragraphs = pageText.split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
+    for (const paragraph of paragraphs) {
+      const lines = wrapHybridText(paragraph, font, 9.5, maxWidth);
+      page = drawWrappedBlock(pdfDoc, page, lines, state, font, 9.5, 14, topY, bottomMargin);
+      state.y -= 8;
     }
-    
-    const lines = pageText.split('\n');
-    let yPos = height - 70;
-    
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (line.length === 0) {
-        yPos -= 10;
-        continue;
-      }
-      
-      const isHeader = line.length < 50 && (line.startsWith('#') || pIdx === 0);
-      const fontSize = isHeader ? 12 : 8.5;
-      const currentFont = isHeader ? boldFont : font;
-      const leadingHeight = isHeader ? 15 : 11;
-      
-      const words = line.split(' ');
-      let currentLine = '';
-      
-      for (const word of words) {
-        const testLine = currentLine ? `${currentLine} ${word}` : word;
-        let textWidth = 0;
-        try {
-          textWidth = currentFont.widthOfTextAtSize(testLine, fontSize);
-        } catch {
-          // Fallback measurement if it contains unsupported characters
-          textWidth = testLine.length * (fontSize * 0.45);
-        }
-        
-        if (textWidth > width - 100) {
-          if (yPos < 60) {
-            pageObj = pdfDoc.addPage([595.276, 841.890]);
-            yPos = height - 70;
-          }
-          try {
-            pageObj.drawText(currentLine, { x: 50, y: yPos, size: fontSize, font: currentFont });
-          } catch {
-            // Clean non-ASCII for drawing placeholder gracefully
-            const sanitized = currentLine.replace(/[^\x00-\x7F]/g, '?');
-            try {
-              pageObj.drawText(sanitized, { x: 50, y: yPos, size: fontSize, font: currentFont });
-            } catch {
-              pageObj.drawText("...", { x: 50, y: yPos, size: fontSize, font: font });
-            }
-          }
-          yPos -= leadingHeight;
-          currentLine = word;
-        } else {
-          currentLine = testLine;
-        }
-      }
-      
-      if (currentLine) {
-        if (yPos < 60) {
-          pageObj = pdfDoc.addPage([595.276, 841.890]);
-          yPos = height - 70;
-        }
-        try {
-          pageObj.drawText(currentLine, { x: 50, y: yPos, size: fontSize, font: currentFont });
-        } catch {
-          const sanitized = currentLine.replace(/[^\x00-\x7F]/g, '?');
-          try {
-            pageObj.drawText(sanitized, { x: 50, y: yPos, size: fontSize, font: currentFont });
-          } catch {
-            pageObj.drawText("...", { x: 50, y: yPos, size: fontSize, font: font });
-          }
-        }
-        yPos -= leadingHeight + 3;
-      }
-    }
+
+    state.y -= 10;
+    pageNumber = state.pageNumber;
   }
-  
+
   const pdfBytes = await pdfDoc.save();
-  
+
   return {
     docxBuffer: Buffer.from(fullTranslatedContent, 'utf8'),
     pdfBuffer: Buffer.from(pdfBytes),
@@ -1191,7 +1424,10 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
   Promise.resolve().then(async () => {
     try {
       const translateRunner = async (textBatch: string[]): Promise<string[]> => {
-        return await translateTextBatch(textBatch, sourceLang, targetLang, tone, customApi);
+        const translated = await translateTextBatch(textBatch, sourceLang, targetLang, tone, customApi);
+        console.log('[translateRunner] batch in', textBatch);
+        console.log('[translateRunner] batch out', translated);
+        return translated;
       };
 
       let outputBuffer: Buffer | null = null;
@@ -1216,7 +1452,19 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
         outputBuffer = await translateMarkdown(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi);
         outputName = originalName.replace(/\.md$/i, `_${targetLang}.md`);
       } else if (ext === '.pdf') {
-        const pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
+        let pdfOut;
+        if (canUsePdf2zh(customApi)) {
+          try {
+            pdfOut = await translatePdfViaPdf2zh(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
+          } catch (pdf2zhErr: any) {
+            console.warn('[pdf2zh fallback]', pdf2zhErr?.message || pdf2zhErr);
+            updateProgress(45, 'PDFMathTranslate 路线失败，已自动回退到基础 PDF 重排翻译引擎...');
+            pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
+          }
+        } else {
+          updateProgress(18, '当前未提供可用于 PDFMathTranslate 的自定义模型配置，PDF 将使用基础重排翻译引擎...');
+          pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
+        }
         jsonPayload = {
           docxBase64: pdfOut.docxBuffer.toString('base64'),
           pdfBase64: pdfOut.pdfBuffer.toString('base64'),
@@ -1737,7 +1985,7 @@ app.post('/api/repack-document', upload.single('file'), async (req, res): Promis
       outputName = originalName.replace(/\.md$/i, `_${targetLang}_corrected.md`);
     } else if (ext === '.pdf') {
       const pdfOut = await translatePdf(file.buffer, mockTranslateRunner, () => {}, undefined, targetLang);
-      
+
       const payload = {
         docxBase64: pdfOut.docxBuffer.toString('base64'),
         pdfBase64: pdfOut.pdfBuffer.toString('base64'),
@@ -1745,7 +1993,7 @@ app.post('/api/repack-document', upload.single('file'), async (req, res): Promis
         outputName: originalName.replace(/\.pdf$/i, `_${targetLang}_corrected.pdf`),
         docxName: originalName.replace(/\.pdf$/i, `_${targetLang}_corrected_text.txt`)
       };
-      
+
       return res.json(payload);
     } else {
       return res.status(400).json({ error: `不支持的文件格式 ${ext}` });
