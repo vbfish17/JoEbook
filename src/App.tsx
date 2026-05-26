@@ -1489,16 +1489,26 @@ export default function App() {
     setTranslationFinished(false);
     setErrorMessage('');
     setResultPayload(null);
+
+    // Support multi-file: iterate through all files
+    const allFiles = files.length > 1 ? files : [files[0]];
     
-    const sId = 'sess_' + Math.random().toString(36).substr(2, 9);
-    setSessionId(sId);
-    setProgressPercent(10);
-    setStagesMessage(currentLang === 'zh' ? '正在连接后端引擎，打包排版树数据...' : 'Connecting to background alignment translator...');
+    for (let fi = 0; fi < allFiles.length; fi++) {
+      const currentFile = allFiles[fi];
+      if (!currentFile || currentFile.size === 0) continue;
 
-    startPollingProgress(sId);
+      const sId = 'sess_' + Math.random().toString(36).substr(2, 9);
+      if (fi === 0) {
+        setSessionId(sId);
+        setProgressPercent(10);
+        setStagesMessage(currentLang === 'zh'
+          ? (allFiles.length > 1 ? `正在处理第 1/${allFiles.length} 个文件...` : '正在连接后端引擎...')
+          : (allFiles.length > 1 ? `Processing file 1/${allFiles.length}...` : 'Connecting to background translator...'));
+        startPollingProgress(sId);
+      }
 
-    const formData = new FormData();
-    formData.append('file', file);
+      const formData = new FormData();
+      formData.append('file', currentFile);
     formData.append('sourceLang', sourceLang);
     formData.append('targetLang', targetLang);
     formData.append('tone', tone);
@@ -1547,6 +1557,7 @@ export default function App() {
         resolveFn(false);
       }
     }
+    }  // end for
   };
 
   // Downloader triggering
