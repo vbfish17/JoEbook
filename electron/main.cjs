@@ -1,9 +1,20 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, ipcMain, session } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const { fork } = require('child_process');
 
 let serverProcess = null;
 let mainWindow = null;
+
+// IPC: Save path management
+let userSavePath = '';
+ipcMain.handle('get-save-path', () => {
+  return userSavePath || '';
+});
+ipcMain.handle('set-save-path', (_event, savePath) => {
+  userSavePath = savePath;
+  return true;
+});
 
 function startServer() {
   // Spawn the compiled Express standalone server as a fork child process
@@ -36,8 +47,28 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js')
     },
-    icon: path.join(__dirname, '..', 'public', 'favicon.ico')
+    icon: path.join(__dirname, '..', 'build', 'icon.icns')
+  });
+
+  // Intercept downloads: save without prompting dialog
+  mainWindow.webContents.session.on('will-download', (_event, item) => {
+    const defaultDir = app.getPath('downloads');
+    const targetDir = userSavePath || defaultDir;
+    
+    if (!fs.existsSync(targetDir)) {
+      try { fs.mkdirSync(targetDir, { recursive: true }); } catch (_) {}
+    }
+    
+    const filePath = path.join(targetDir, item.getFilename());
+    item.setSavePath(filePath);
+    
+    item.on('done', (_event, state) => {
+      if (state === 'completed') {
+        console.log('Download completed:', filePath);
+      }
+    });
   });
 
   // Give local server a head start to bind to port 7050

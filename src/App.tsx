@@ -31,7 +31,8 @@ import {
   Cpu as CpuIcon,
   Sliders,
   Eye,
-  Save
+  Save,
+  FolderOpen
 } from 'lucide-react';
 
 interface CustomApiConfig {
@@ -194,7 +195,12 @@ const translations = {
     presetSection: "主流 LLM API 快捷预设模板 Click-Fill ⚡",
     presetInfo: "点击模板将自动填写对应的 Base URL 和标准 Model!",
     selectPresetBtn: "选择该预设",
-    currentLangIndicator: "当前语言"
+    currentLangIndicator: "当前语言",
+    saveLocation: "文件保存位置 (Web/DMG 均适用)",
+    saveLocationSource: "源文件所在目录 (默认)",
+    saveLocationCustom: "自定义目录路径",
+    saveLocationPlaceholder: "例如: /Users/myname/Downloads/Translated",
+    saveLocationNote: "⚠ 仅限 macOS 桌面端 (DMG) — Web 版受限于浏览器安全策略，文件将自动下载至浏览器默认下载文件夹。"
   },
   en: {
     title: "JoEbook",
@@ -249,7 +255,12 @@ const translations = {
     presetSection: "Major LLM API Template Autocomplete ⚡",
     presetInfo: "Click any templated endpoint to instantly configure API Base URL and matching model variables!",
     selectPresetBtn: "Apply Template",
-    currentLangIndicator: "Current OS Language"
+    currentLangIndicator: "Current OS Language",
+    saveLocation: "File Save Location (Web & DMG)",
+    saveLocationSource: "Source File Directory (Default)",
+    saveLocationCustom: "Custom Directory Path",
+    saveLocationPlaceholder: "e.g., /Users/myname/Downloads/Translated",
+    saveLocationNote: "⚠ DMG (macOS Desktop) only — Web version is limited by browser security policy; files will auto-download to your browser's default download folder."
   }
 };
 
@@ -354,6 +365,17 @@ export default function App() {
   const [modelsFetchError, setModelsFetchError] = useState<string>('');
   const [showSettings, setShowSettings] = useState<boolean>(true);
   const [settingsSavedBadge, setSettingsSavedBadge] = useState<boolean>(false);
+  const [saveMode, setSaveMode] = useState<'source' | 'custom'>(() => {
+    try {
+      const saved = localStorage.getItem('trans_save_mode');
+      return saved === 'custom' ? 'custom' : 'source';
+    } catch { return 'source'; }
+  });
+  const [customSavePath, setCustomSavePath] = useState<string>(() => {
+    try {
+      return localStorage.getItem('trans_custom_save_path') || '';
+    } catch { return ''; }
+  });
   const [draftRestoredNotification, setDraftRestoredNotification] = useState<string | null>(null);
   const [draftSavedBadge, setDraftSavedBadge] = useState<boolean>(false);
   const [showApiFields, setShowApiFields] = useState<boolean>(true);
@@ -495,6 +517,14 @@ export default function App() {
     } catch (_) {}
   }, [useCustomApi, selectedPreset, customApi, presetConfigs]);
 
+  // Auto-save location settings
+  useEffect(() => {
+    try {
+      localStorage.setItem('trans_save_mode', saveMode);
+      localStorage.setItem('trans_custom_save_path', customSavePath);
+    } catch (_) {}
+  }, [saveMode, customSavePath]);
+
   // Save Settings manual function
   const saveSettingsLocally = () => {
     try {
@@ -502,6 +532,8 @@ export default function App() {
       localStorage.setItem('trans_selected_preset', selectedPreset);
       localStorage.setItem('trans_custom_api_config', JSON.stringify(customApi));
       localStorage.setItem('trans_preset_configs_v3', JSON.stringify(presetConfigs));
+      localStorage.setItem('trans_save_mode', saveMode);
+      localStorage.setItem('trans_custom_save_path', customSavePath);
       setSettingsSavedBadge(true);
       setTimeout(() => {
         setSettingsSavedBadge(false);
@@ -513,6 +545,23 @@ export default function App() {
       console.error("Failed to save settings to localStorage", e);
     }
   };
+
+  // Helper: determine effective save directory
+  const getEffectiveSavePath = (): string => {
+    if (saveMode === 'custom' && customSavePath.trim()) {
+      return customSavePath.trim();
+    }
+    return ''; // empty = use source file directory
+  };
+
+  // Sync save path to Electron main process (DMG only)
+  useEffect(() => {
+    const win = window as any;
+    if (win.electronAPI?.setSavePath) {
+      const effectivePath = saveMode === 'custom' ? customSavePath.trim() : '';
+      win.electronAPI.setSavePath(effectivePath).catch(() => {});
+    }
+  }, [saveMode, customSavePath]);
 
   // Auto-save interactive drafts when translated paragraphs or statuses change
   useEffect(() => {
@@ -1719,8 +1768,8 @@ export default function App() {
       {/* Bento Grid Containers */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
         <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center border border-indigo-500/30">
-            <Languages className="w-5 h-5 text-white animate-pulse" />
+          <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center border border-indigo-500/30 overflow-hidden">
+            <img src="/assets/JoE_round.png" alt="JoE" className="w-8 h-8 object-contain" />
           </div>
           <div>
             <h1 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
@@ -2809,6 +2858,51 @@ export default function App() {
                     </motion.div>
                   )}
                 </AnimatePresence>
+
+                {/* Save Location Setting */}
+                <div className="mt-4 pt-4 border-t border-zinc-800/60">
+                  <h4 className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider mb-3 flex items-center gap-2">
+                    <FolderOpen className="w-3.5 h-3.5 text-indigo-400" />
+                    {t.saveLocation}
+                  </h4>
+                  <div className="space-y-2">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="saveMode"
+                        checked={saveMode === 'source'}
+                        onChange={() => setSaveMode('source')}
+                        className="w-3.5 h-3.5 text-indigo-500 bg-zinc-900 border-zinc-700 focus:ring-indigo-500"
+                      />
+                      <span className="text-xs text-zinc-300">{t.saveLocationSource}</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="saveMode"
+                        checked={saveMode === 'custom'}
+                        onChange={() => setSaveMode('custom')}
+                        className="w-3.5 h-3.5 text-indigo-500 bg-zinc-900 border-zinc-700 focus:ring-indigo-500"
+                      />
+                      <span className="text-xs text-zinc-300">{t.saveLocationCustom}</span>
+                    </label>
+                    {saveMode === 'custom' && (
+                      <div className="pl-6">
+                        <input
+                          type="text"
+                          id="custom_save_path"
+                          value={customSavePath}
+                          onChange={(e) => setCustomSavePath(e.target.value)}
+                          placeholder={t.saveLocationPlaceholder}
+                          className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 font-mono mt-1"
+                        />
+                      </div>
+                    )}
+                  </div>
+                  <p className="text-[9px] text-zinc-600 mt-2 leading-relaxed">
+                    {t.saveLocationNote}
+                  </p>
+                </div>
 
               </div>
               <div className="mt-4 text-[10px] text-zinc-500 border-t border-zinc-800/40 pt-3">

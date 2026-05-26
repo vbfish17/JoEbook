@@ -2124,7 +2124,19 @@ Before packaging, you can open \`main.js\` and edit the \`APP_URL\` environment 
 5. Once compiling finishes, locate the ready-to-run \`JoEbook-1.0.0-arm64.dmg\` file in the \`dist/\` folders, and drag-and-drop installer onto your system Applications!`;
 
     // Add main.js
-    const mainJsContent = `const { app, BrowserWindow, Menu } = require('electron');
+    const mainJsContent = `const { app, BrowserWindow, Menu, ipcMain, session, dialog } = require('electron');
+const path = require('path');
+const fs = require('fs');
+
+// IPC: Get save path from renderer (custom or default)
+let userSavePath = '';
+ipcMain.handle('get-save-path', () => {
+  return userSavePath || '';
+});
+ipcMain.handle('set-save-path', (_event, savePath) => {
+  userSavePath = savePath;
+  return true;
+});
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -2132,15 +2144,36 @@ function createWindow() {
     height: 800,
     title: "JoEbook",
     titleBarStyle: 'default',
+    icon: path.join(__dirname, 'icon.png'),
     webPreferences: {
       nodeIntegration: false,
-      contextIsolation: true
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js')
     }
   });
 
   // Load the web app URL. 
   const appURL = process.env.APP_URL || "${req.headers.referer || 'https://ais-dev-jtz4idduxc7va53lohaw7o-283544313319.us-west2.run.app'}";
   mainWindow.loadURL(appURL);
+
+  // Intercept downloads: save without prompting, use custom path or default Downloads
+  mainWindow.webContents.session.on('will-download', (_event, item) => {
+    const defaultDir = app.getPath('downloads');
+    const targetDir = userSavePath || defaultDir;
+    
+    if (!fs.existsSync(targetDir)) {
+      try { fs.mkdirSync(targetDir, { recursive: true }); } catch (_) {}
+    }
+    
+    const filePath = path.join(targetDir, item.getFilename());
+    item.setSavePath(filePath);
+    
+    item.on('done', (_event, state) => {
+      if (state === 'completed') {
+        console.log('Download completed:', filePath);
+      }
+    });
+  });
 
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     {
@@ -2202,6 +2235,14 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});`;
+
+    // Add preload.js for Electron IPC
+    const preloadJsContent = `const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('electronAPI', {
+  getSavePath: () => ipcRenderer.invoke('get-save-path'),
+  setSavePath: (savePath) => ipcRenderer.invoke('set-save-path', savePath)
 });`;
 
     // Add package.json
@@ -2280,6 +2321,7 @@ echo "=========================================================="`;
     // Create folders in ZIP
     zip.file("joebook-mac-kit/README.md", readmeContent);
     zip.file("joebook-mac-kit/main.js", mainJsContent);
+    zip.file("joebook-mac-kit/preload.js", preloadJsContent);
     zip.file("joebook-mac-kit/package.json", packageJsonContent);
     zip.file("joebook-mac-kit/build-dmg.sh", buildDmgShContent);
 
