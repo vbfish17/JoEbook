@@ -1515,7 +1515,12 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
         outputName = originalName.replace(/\.md$/i, `_${targetLang}.md`);
       } else if (ext === '.pdf') {
         let pdfOut;
-        if (canUsePymupdf(customApi)) {
+        // DMG/Production: skip Python-dependent routes, use built-in translatePdf
+        const hasPython = (() => { try { require('child_process').execSync('python3 --version'); return true; } catch { return false; } })();
+        if (!hasPython) {
+          updateProgress(15, '使用内置 PDF 翻译引擎...');
+          pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
+        } else if (canUsePymupdf(customApi)) {
           try {
             pdfOut = await translatePdfViaPymupdf(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
           } catch (pymupdfErr: any) {
@@ -2300,8 +2305,9 @@ const startExpress = async () => {
     });
     app.use(vite.middlewares);
   } else {
-    // Dist compiled folder structure
-    const distPath = path.join(process.cwd(), 'dist');
+    // DMG/Production: serve from the same directory as server.cjs (dist/)
+    const distPath = path.resolve(__dirname);
+    console.log('Serving static from:', distPath);
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
