@@ -1,6 +1,6 @@
 <div align="center">
   <br />
-  <img src="./dist-desktop/JoE.svg" alt="JoEbook Logo" width="128" height="128" />
+  <img src="./assets/JoE.svg" alt="JoEbook Logo" width="128" height="128" />
   <h1>🚀 JoEbook (久易)</h1>
   <p><b>Intelligent Form-Preserving Document Translation & Dual-Pane Proofreading Workspace</b></p>
 
