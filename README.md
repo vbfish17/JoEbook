@@ -1,5 +1,6 @@
 <div align="center">
   <br />
+  <img src="./dist-desktop/JoE.svg" alt="JoEbook Logo" width="128" height="128" />
   <h1>🚀 JoEbook (久易)</h1>
   <p><b>Intelligent Form-Preserving Document Translation & Dual-Pane Proofreading Workspace</b></p>
 
@@ -17,7 +18,6 @@
 
   <p>
     <b>
-      <a href="https://ais-pre-jtz4idduxc7va53lohaw7o-283544313319.us-west2.run.app">Live Demo</a> · 
       <a href="./README_DEV.md">Developer Docs</a> · 
       <a href="#-acknowledgements--open-source-heritage">Acknowledgements</a>
     </b>
@@ -86,14 +86,9 @@ The core parsing and rewriting logic in JoEbook is heavily inspired by and utili
 
 ---
 
-## 🔒 Open Source License & Roadmap
+## 🔒 License
 
 *   Under the **MIT License**. Free to use, adapt, and integrate into commercial systems.
-*   **Roadmap**:
-    1. [x] Form-preserving PDF/DOCX dual-lingual export and layout mapping validation.
-    2. [x] Local environment fallback via `idb-keyval` for limitless offline projects management.
-    3. [ ] Integrations for offline OCR extraction & layout partitioning for scanned PDFs.
-    4. [ ] Edge device computational adaptations for vector-based EPUB/PDF reconstructions.
 
 ---
 

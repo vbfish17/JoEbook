@@ -1451,8 +1451,8 @@ const translationCaches: Record<string, {
 
 app.post('/api/translate', upload.single('file'), async (req, res): Promise<any> => {
   const file = req.file;
-  if (!file || file.size === 0 || !file.buffer || file.buffer.length === 0) {
-    return res.status(400).json({ error: '上传的文件内容为空（大小为0字节）。若您是从历史记录中加载的，可能由于浏览器本地存储限制没能缓存原始文档，请点击重新拖入并上传您的本地原始文件再进行翻译。' });
+  if (!file || !file.buffer || file.buffer.length === 0) {
+    return res.status(400).json({ error: '上传的文件内容为空' });
   }
   
   const { sourceLang, targetLang, tone, sessionId } = req.body;
