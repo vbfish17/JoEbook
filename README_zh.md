@@ -1,5 +1,6 @@
 <div align="center">
   <br />
+  <img src="./assets/JoE_round.png" alt="JoEbook Logo" width="128" height="128" />
   <h1>🚀 JoEbook (久易)</h1>
   <p><b>智能非破坏性文档高保真排版翻译 & 双栏沉浸式极致校对工作站</b></p>
 
