@@ -61,6 +61,8 @@ def clean_translated_text(text: str) -> str:
     normalized = '\n'.join(merged_lines)
     normalized = re.sub(r'(?<=[A-Za-z0-9])\n(?=[A-Za-z0-9])', ' ', normalized)
     normalized = re.sub(r'\n{3,}', '\n\n', normalized)
+    # Strip trailing pinyin (e.g. "季度业务回顾 (Jìdù yèwù huígù)")
+    normalized = re.sub(r'\s*\([^)]*[a-zA-Z].*\)$', '', normalized)
     return normalized.strip()
 
 
@@ -94,8 +96,7 @@ def main():
     if system_font:
         envs['NOTO_FONT_PATH'] = system_font
     prompt = Template(
-        'Translate strictly and return only the final translation with no explanation. '
-        '<<<source>>>$lang_in<<<target>>>$lang_out<<<text>>>$text'
+        'Translate to $lang_out. Only output the translation.\n\n$text'
     )
 
     mono, dual = translate_stream(

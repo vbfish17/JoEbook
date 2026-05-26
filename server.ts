@@ -94,6 +94,68 @@ async function translatePdfViaPdf2zh(
   }
 }
 
+const PYMUPDF_SCRIPT = path.resolve(process.cwd(), 'scripts/pdf_translate_via_pymupdf.py');
+
+function canUsePymupdf(customApi?: CustomApiConfig): boolean {
+  return !!(customApi?.baseUrl && customApi?.model);
+}
+
+async function translatePdfViaPymupdf(
+  fileBuffer: Buffer,
+  progress: (msg: string) => void,
+  customApi: CustomApiConfig,
+  sourceLang: string | undefined,
+  targetLang: string
+): Promise<{ docxBuffer: Buffer; pdfBuffer: Buffer; textContent: string }> {
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'joebook-pymupdf-'));
+  const inputPath = path.join(tempDir, 'input.pdf');
+  const outputPath = path.join(tempDir, 'translated.pdf');
+  const outputTextPath = path.join(tempDir, 'translated.txt');
+
+  try {
+    await fs.promises.writeFile(inputPath, fileBuffer);
+    progress('已切换到 PyMuPDF 高保真 PDF 翻译引擎（保留原版式与颜色）...');
+
+    const args = [
+      PYMUPDF_SCRIPT,
+      '--input', inputPath,
+      '--lang-in', normalizePdf2zhLang(sourceLang),
+      '--lang-out', normalizePdf2zhLang(targetLang),
+      '--base-url', String(customApi.baseUrl || '').trim(),
+      '--model', String(customApi.model || '').trim(),
+      '--api-key', customApi.apiKey || 'not-required',
+      '--output-pdf', outputPath,
+      '--output-text', outputTextPath,
+    ];
+
+    const { stdout, stderr } = await execFileAsync(PDF2ZH_PYTHON, args, {
+      cwd: process.cwd(),
+      maxBuffer: 10 * 1024 * 1024,
+    });
+
+    if (stderr?.trim()) {
+      console.warn('[pymupdf stderr]', stderr.trim());
+    }
+    if (stdout?.trim()) {
+      console.log('[pymupdf stdout]', stdout.trim());
+    }
+
+    const [pdfBuffer, textContent] = await Promise.all([
+      fs.promises.readFile(outputPath),
+      fs.promises.readFile(outputTextPath, 'utf8'),
+    ]);
+
+    progress(`PyMuPDF 输出完成：${pdfBuffer.length} bytes，文本 ${textContent.length} 字符。`);
+    return {
+      docxBuffer: Buffer.from(textContent, 'utf8'),
+      pdfBuffer,
+      textContent,
+    };
+  } finally {
+    await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 async function pdfParse(fileBuffer: Buffer): Promise<{ text: string }> {
   try {
     const parser = new PDFParse({ data: new Uint8Array(fileBuffer) });
@@ -1453,7 +1515,27 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
         outputName = originalName.replace(/\.md$/i, `_${targetLang}.md`);
       } else if (ext === '.pdf') {
         let pdfOut;
-        if (canUsePdf2zh(customApi)) {
+        if (canUsePymupdf(customApi)) {
+          try {
+            pdfOut = await translatePdfViaPymupdf(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
+          } catch (pymupdfErr: any) {
+            console.warn('[pymupdf fallback]', pymupdfErr?.message || pymupdfErr);
+            // Fallback to pdf2zh
+            if (canUsePdf2zh(customApi)) {
+              try {
+                updateProgress(35, 'PyMuPDF 路线失败，已自动回退到 PDFMathTranslate 引擎...');
+                pdfOut = await translatePdfViaPdf2zh(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
+              } catch (pdf2zhErr: any) {
+                console.warn('[pdf2zh fallback]', pdf2zhErr?.message || pdf2zhErr);
+                updateProgress(45, 'PDFMathTranslate 路线也失败，已自动回退到基础 PDF 重排翻译引擎...');
+                pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
+              }
+            } else {
+              updateProgress(45, '当前未提供 pdf2zh 自定义模型配置，将使用基础 PDF 重排翻译引擎...');
+              pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
+            }
+          }
+        } else if (canUsePdf2zh(customApi)) {
           try {
             pdfOut = await translatePdfViaPdf2zh(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
           } catch (pdf2zhErr: any) {
@@ -1462,7 +1544,7 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
             pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
           }
         } else {
-          updateProgress(18, '当前未提供可用于 PDFMathTranslate 的自定义模型配置，PDF 将使用基础重排翻译引擎...');
+          updateProgress(18, '当前未提供可用于 PDF 高保真翻译的自定义模型配置，PDF 将使用基础重排翻译引擎...');
           pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
         }
         jsonPayload = {
