@@ -214,11 +214,11 @@ const translations = {
     presetInfo: "点击模板将自动填写对应的 Base URL 和标准 Model!",
     selectPresetBtn: "选择该预设",
     currentLangIndicator: "当前语言",
-    saveLocation: "文件保存位置 (Web/DMG 均适用)",
+    saveLocation: "文件保存位置",
     saveLocationSource: "源文件所在目录 (默认)",
     saveLocationCustom: "自定义目录路径",
     saveLocationPlaceholder: "例如: /Users/myname/Downloads/Translated",
-    saveLocationNote: "⚠ 仅限 macOS 桌面端 (DMG) — Web 版受限于浏览器安全策略，文件将自动下载至浏览器默认下载文件夹。"
+    saveLocationNote: "",
   },
   en: {
     title: "JoEbook",
@@ -274,11 +274,11 @@ const translations = {
     presetInfo: "Click any templated endpoint to instantly configure API Base URL and matching model variables!",
     selectPresetBtn: "Apply Template",
     currentLangIndicator: "Current OS Language",
-    saveLocation: "File Save Location (Web & DMG)",
+    saveLocation: "File Save Location",
     saveLocationSource: "Source File Directory (Default)",
     saveLocationCustom: "Custom Directory Path",
     saveLocationPlaceholder: "e.g., /Users/myname/Downloads/Translated",
-    saveLocationNote: "⚠ DMG (macOS Desktop) only — Web version is limited by browser security policy; files will auto-download to your browser's default download folder."
+    saveLocationNote: "",
   }
 };
 
@@ -394,6 +394,8 @@ export default function App() {
       return localStorage.getItem('trans_custom_save_path') || '';
     } catch { return ''; }
   });
+  // DMG detection: has Electron file system API
+  const isDMG = typeof window !== 'undefined' && !!(window as any).electronAPI?.setSavePath;
   const [draftRestoredNotification, setDraftRestoredNotification] = useState<string | null>(null);
   const [draftSavedBadge, setDraftSavedBadge] = useState<boolean>(false);
   const [showApiFields, setShowApiFields] = useState<boolean>(true);
@@ -1579,6 +1581,11 @@ export default function App() {
 
       startPollingProgress(sId, currentFile);
 
+      // Wait for polling to detect completion via batchResolveRef
+      const translationPromise = new Promise<boolean>((resolve) => {
+        batchResolveRef.current = resolve;
+      });
+
       const formData = new FormData();
       formData.append('file', currentFile);
       formData.append('sourceLang', sourceLang);
@@ -1614,7 +1621,11 @@ export default function App() {
           throw new Error(errMsg || (currentLang === 'zh' ? '翻译失败' : 'Translation failed'));
         }
 
-        await handleDownloadCachedResult(sId, currentFile);
+        // Wait for polling to detect completion and handle download
+        const success = await translationPromise;
+        if (!success) {
+          throw new Error(currentLang === 'zh' ? '翻译下载失败' : 'Translation download failed');
+        }
       } catch (err: any) {
         console.error(err);
         const fallbackMessage = currentLang === 'zh'
@@ -1881,8 +1892,8 @@ export default function App() {
       {/* Bento Grid Containers */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
         <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center border border-indigo-500/30 overflow-hidden">
-            <img src="/assets/JoE_round.png" alt="JoE" className="w-8 h-8 object-contain" />
+          <div className="w-10 h-10 flex items-center justify-center overflow-hidden">
+            <img src="/assets/JoE.svg" alt="JoE" className="w-full h-full object-contain" />
           </div>
           <div>
             <h1 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
@@ -2972,7 +2983,8 @@ export default function App() {
                   )}
                 </AnimatePresence>
 
-                {/* Save Location Setting */}
+                {isDMG && (
+                /* Save Location Setting */
                 <div className="mt-4 pt-4 border-t border-zinc-800/60">
                   <h4 className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider mb-3 flex items-center gap-2">
                     <FolderOpen className="w-3.5 h-3.5 text-indigo-400" />
@@ -3012,10 +3024,13 @@ export default function App() {
                       </div>
                     )}
                   </div>
-                  <p className="text-[9px] text-zinc-600 mt-2 leading-relaxed">
-                    {t.saveLocationNote}
-                  </p>
+                  {t.saveLocationNote && (
+                    <p className="text-[9px] text-zinc-600 mt-2 leading-relaxed">
+                      {t.saveLocationNote}
+                    </p>
+                  )}
                 </div>
+                )}
 
               </div>
               <div className="mt-4 text-[10px] text-zinc-500 border-t border-zinc-800/40 pt-3">

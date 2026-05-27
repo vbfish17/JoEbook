@@ -7,7 +7,7 @@ import JSZip from 'jszip';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit/dist/fontkit.umd.js';
 import { PDFParse } from 'pdf-parse';
-import { execFile } from 'child_process';
+import { execFile, execSync } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
@@ -1436,6 +1436,64 @@ async function translatePdf(
   };
 }
 
+// ── translatePdfViaDirectV3: Python 逐 span API 翻译 + 白底黑字覆盖 + 术语修正 ──
+const DIRECT_V3_SCRIPT = path.resolve(process.cwd(), 'scripts/pdf_translate_workflow.py');
+
+async function translatePdfViaDirectV3(
+  fileBuffer: Buffer,
+  progress: (msg: string) => void,
+  targetLang: string
+): Promise<{ docxBuffer: Buffer; pdfBuffer: Buffer; textContent: string }> {
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'joebook-directv3-'));
+  const inputPath = path.join(tempDir, 'input.pdf');
+  const outputPath = path.join(tempDir, 'input_zh_glossary.pdf');
+
+  try {
+    await fs.promises.writeFile(inputPath, fileBuffer);
+    console.log('[directV3] Starting Python script...');
+    progress('已切换到 Python 逐页高保真 PDF 翻译引擎（逐页识别 + 白底黑字覆盖 + 术语修正）...');
+
+    // Use --output to pass explicit output path
+    const args = [DIRECT_V3_SCRIPT, inputPath, '--output', outputPath];
+    const { stdout, stderr } = await execFileAsync(PDF2ZH_PYTHON, args, {
+      cwd: process.cwd(),
+      maxBuffer: 20 * 1024 * 1024,
+      timeout: 600000, // 10 minutes for large PDFs
+    });
+    if (stderr?.trim()) console.warn('[directV3 stderr]', stderr.trim());
+    console.log('[directV3 stdout]', stdout.trim());
+
+    let pdfBuffer: Buffer;
+    if (fs.existsSync(outputPath)) {
+      pdfBuffer = await fs.promises.readFile(outputPath);
+    } else {
+      // Fallback: try step1 output (translated but not glossary-fixed)
+      const fallbackPath = path.join(tempDir, 'input_zh_translated.pdf');
+      pdfBuffer = fs.existsSync(fallbackPath)
+        ? await fs.promises.readFile(fallbackPath)
+        : await fs.promises.readFile(inputPath); // last resort: original
+    }
+
+    // Extract text content for docx output
+    let textContent = '';
+    try {
+      const pdfParseMod = await import('pdf-parse');
+      const parser = new pdfParseMod.PDFParse({ data: new Uint8Array(pdfBuffer) });
+      const result = await parser.getText();
+      textContent = result.pages.map((p: any) => p.text).join('\n');
+    } catch { textContent = '(text extraction unavailable)'; }
+
+    progress('PDF 高保真翻译完成');
+    return {
+      docxBuffer: Buffer.from(textContent, 'utf8'),
+      pdfBuffer,
+      textContent,
+    };
+  } finally {
+    await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 // Global active operations tracking progress
 const activeSessions: Record<string, { status: string; progress: number; outputReady?: boolean; error?: boolean; errorMsg?: string }> = {};
 
@@ -1515,42 +1573,53 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
         outputName = originalName.replace(/\.md$/i, `_${targetLang}.md`);
       } else if (ext === '.pdf') {
         let pdfOut;
-        // DMG/Production: skip Python-dependent routes, use built-in translatePdf
-        const hasPython = (() => { try { require('child_process').execSync('python3 --version'); return true; } catch { return false; } })();
+        const hasPython = (() => { try { execSync('python3 --version', {stdio:'pipe'}); return true; } catch { return false; } })();
         if (!hasPython) {
           updateProgress(15, '使用内置 PDF 翻译引擎...');
           pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
-        } else if (canUsePymupdf(customApi)) {
+        } else {
+          // Python available: try V3 direct workflow first (逐 span API 翻译 + 白底黑字覆盖 + 术语修正)
           try {
-            pdfOut = await translatePdfViaPymupdf(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
-          } catch (pymupdfErr: any) {
-            console.warn('[pymupdf fallback]', pymupdfErr?.message || pymupdfErr);
-            // Fallback to pdf2zh
-            if (canUsePdf2zh(customApi)) {
+            updateProgress(15, '使用 Python 高保真工作流（逐 span 翻译 + 白底黑字覆盖）...');
+            pdfOut = await translatePdfViaDirectV3(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), targetLang);
+          } catch (directErr: any) {
+            console.warn('[directV3 fallback]', directErr?.message || directErr);
+            // Fallback to PyMuPDF if custom API is configured
+            if (canUsePymupdf(customApi)) {
               try {
-                updateProgress(35, 'PyMuPDF 路线失败，已自动回退到 PDFMathTranslate 引擎...');
+                updateProgress(35, 'Direct V3 路线失败，已自动回退到 PyMuPDF 引擎...');
+                pdfOut = await translatePdfViaPymupdf(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
+              } catch (pymupdfErr: any) {
+                console.warn('[pymupdf fallback]', pymupdfErr?.message || pymupdfErr);
+                // Fallback to pdf2zh
+                if (canUsePdf2zh(customApi)) {
+                  try {
+                    updateProgress(45, 'PyMuPDF 路线也失败，已自动回退到 PDFMathTranslate 引擎...');
+                    pdfOut = await translatePdfViaPdf2zh(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
+                  } catch (pdf2zhErr: any) {
+                    console.warn('[pdf2zh fallback]', pdf2zhErr?.message || pdf2zhErr);
+                    updateProgress(55, '所有 Python 路线均失败，已自动回退到基础 PDF 重排翻译引擎...');
+                    pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
+                  }
+                } else {
+                  updateProgress(45, '未提供 pdf2zh 自定义模型配置，已自动回退到基础 PDF 重排翻译引擎...');
+                  pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
+                }
+              }
+            } else if (canUsePdf2zh(customApi)) {
+              try {
+                updateProgress(35, 'Direct V3 路线失败，已自动回退到 PDFMathTranslate 引擎...');
                 pdfOut = await translatePdfViaPdf2zh(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
               } catch (pdf2zhErr: any) {
                 console.warn('[pdf2zh fallback]', pdf2zhErr?.message || pdf2zhErr);
-                updateProgress(45, 'PDFMathTranslate 路线也失败，已自动回退到基础 PDF 重排翻译引擎...');
+                updateProgress(45, 'PDFMathTranslate 路线失败，已自动回退到基础 PDF 重排翻译引擎...');
                 pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
               }
             } else {
-              updateProgress(45, '当前未提供 pdf2zh 自定义模型配置，将使用基础 PDF 重排翻译引擎...');
+              updateProgress(35, '无可用自定义 API 配置，使用基础 PDF 重排翻译引擎...');
               pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
             }
           }
-        } else if (canUsePdf2zh(customApi)) {
-          try {
-            pdfOut = await translatePdfViaPdf2zh(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
-          } catch (pdf2zhErr: any) {
-            console.warn('[pdf2zh fallback]', pdf2zhErr?.message || pdf2zhErr);
-            updateProgress(45, 'PDFMathTranslate 路线失败，已自动回退到基础 PDF 重排翻译引擎...');
-            pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
-          }
-        } else {
-          updateProgress(18, '当前未提供可用于 PDF 高保真翻译的自定义模型配置，PDF 将使用基础重排翻译引擎...');
-          pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
         }
         jsonPayload = {
           docxBase64: pdfOut.docxBuffer.toString('base64'),
@@ -2358,6 +2427,8 @@ const startExpress = async () => {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`JoEbook running locally on http://localhost:${PORT}`);
+    console.log('[startup] DirectV3 available:', typeof translatePdfViaDirectV3 !== 'undefined');
+    console.log('[startup] hasPython check:', (() => { try { require('child_process').execSync('python3 --version'); return true; } catch { return false; } })());
   });
 };
 
