@@ -7,3 +7,10 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Development / experiment scripts
+scripts/
+samples/
+test_*.ts
+test_*.mjs
+PROGRESS.md

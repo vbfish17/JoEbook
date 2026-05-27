@@ -56,6 +56,24 @@ interface TranslationHistoryItem {
   fileBase64?: string;
 }
 
+interface ResultPayload {
+  docxBase64?: string;
+  pdfBase64?: string;
+  textContent?: string;
+  outputName?: string;
+  docxName?: string;
+  directDownloadBlob?: Blob;
+  directDownloadName?: string;
+}
+
+interface WorkspaceResultItem {
+  id: string;
+  sourceFileName: string;
+  format: string;
+  targetLang: string;
+  result: ResultPayload;
+}
+
 interface LlmPreset {
   id: string;
   name: string;
@@ -451,15 +469,8 @@ export default function App() {
 
   // Result Cache
   const [translatingPriorityIds, setTranslatingPriorityIds] = useState<number[]>([]);
-  const [resultPayload, setResultPayload] = useState<{
-    docxBase64?: string;
-    pdfBase64?: string;
-    textContent?: string;
-    outputName?: string;
-    docxName?: string;
-    directDownloadBlob?: Blob;
-    directDownloadName?: string;
-  } | null>(null);
+  const [resultPayload, setResultPayload] = useState<ResultPayload | null>(null);
+  const [workspaceResults, setWorkspaceResults] = useState<WorkspaceResultItem[]>([]);
 
   // History State
   const [history, setHistory] = useState<TranslationHistoryItem[]>([]);
@@ -759,6 +770,7 @@ export default function App() {
       setErrorMessage(customError);
       setTranslationFinished(false);
       setResultPayload(null);
+      setWorkspaceResults([]);
     } else if (customError) {
       setErrorMessage(customError);
     }
@@ -797,7 +809,7 @@ export default function App() {
   };
 
   // Start checking progress from server
-  const startPollingProgress = (sId: string) => {
+  const startPollingProgress = (sId: string, sourceFile?: File | null) => {
     if (progressPollingRef.current) clearInterval(progressPollingRef.current);
     isDownloadingRef.current = false;
     
@@ -823,7 +835,7 @@ export default function App() {
             if (isDownloadingRef.current) return;
             isDownloadingRef.current = true;
             clearInterval(progressPollingRef.current);
-            await handleDownloadCachedResult(sId);
+            await handleDownloadCachedResult(sId, sourceFile || files[activeIndex] || null);
           }
         }
       } catch (err) {
@@ -832,7 +844,7 @@ export default function App() {
     }, 1200);
   };
 
-  const handleDownloadCachedResult = async (sId: string) => {
+  const handleDownloadCachedResult = async (sId: string, sourceFile?: File | null) => {
       try {
         const response = await fetch(`/api/translate-download/${sId}`);
         
@@ -850,14 +862,22 @@ export default function App() {
         const contentType = response.headers.get('content-type');
         if (contentType && contentType.includes('application/json')) {
           const payload = await response.json();
-          setResultPayload(payload);
+          const effectiveFile = sourceFile || file;
+          const workspaceItem: WorkspaceResultItem = {
+            id: sId,
+            sourceFileName: effectiveFile?.name || payload.outputName || 'translated_file',
+            format: 'PDF (Dual Output)',
+            targetLang,
+            result: payload
+          };
+          appendWorkspaceResult(workspaceItem);
           
           // Add to history
-          if (file) {
+          if (effectiveFile) {
             const newHistoryItem: TranslationHistoryItem = {
               id: sId,
-              name: file.name,
-              size: formatBytes(file.size),
+              name: effectiveFile.name,
+              size: formatBytes(effectiveFile.size),
               sourceLang,
               targetLang,
               timestamp: new Date().toLocaleTimeString(),
@@ -877,8 +897,9 @@ export default function App() {
           }
         } else {
           const blob = await response.blob();
+          const effectiveFile = sourceFile || file;
           
-          let dispositionName = file ? file.name.replace(/\.[^/.]+$/, "") + `_${targetLang}.${file.name.split('.').pop()}` : `translated_${targetLang}.file`;
+          let dispositionName = effectiveFile ? effectiveFile.name.replace(/\.[^/.]+$/, "") + `_${targetLang}.${effectiveFile.name.split('.').pop()}` : `translated_${targetLang}.file`;
           const disposition = response.headers.get('content-disposition');
           if (disposition && disposition.indexOf('filename=') !== -1) {
             const match = disposition.match(/filename="?([^";]+)"?/);
@@ -887,22 +908,29 @@ export default function App() {
             }
           }
 
-          setResultPayload({
+          const payload: ResultPayload = {
             directDownloadBlob: blob,
             directDownloadName: dispositionName
+          };
+          appendWorkspaceResult({
+            id: sId,
+            sourceFileName: effectiveFile?.name || dispositionName,
+            format: effectiveFile?.name.split('.').pop()?.toUpperCase() || 'DOC',
+            targetLang,
+            result: payload
           });
 
           // Add to history
-          if (file) {
+          if (effectiveFile) {
             const b64 = await blobToBase64(blob).catch(() => undefined);
             const newHistoryItem: TranslationHistoryItem = {
               id: sId,
-              name: file.name,
-              size: formatBytes(file.size),
+              name: effectiveFile.name,
+              size: formatBytes(effectiveFile.size),
               sourceLang,
               targetLang,
               timestamp: new Date().toLocaleTimeString(),
-              format: file.name.split('.').pop()?.toUpperCase() || 'DOC',
+              format: effectiveFile.name.split('.').pop()?.toUpperCase() || 'DOC',
               fileBase64: b64
             };
             saveHistory((prev) => [newHistoryItem, ...prev]);
@@ -910,14 +938,7 @@ export default function App() {
 
           // Auto-download direct file
           try {
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = dispositionName;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            window.URL.revokeObjectURL(url);
+            downloadResultPayload(payload);
           } catch (err) { }
         }
 
@@ -938,7 +959,7 @@ export default function App() {
           resolveFn(false);
         }
       } finally {
-        setIsTranslating(false);
+        // isTranslating is controlled by the outer single/batch run lifecycle
       }
   };
 
@@ -1519,6 +1540,8 @@ export default function App() {
     }
 
     setIsBatchProcessing(false);
+    setIsTranslating(false);
+    setTranslationFinished(true);
     setProgressPercent(100);
     setStagesMessage(currentLang === 'zh' ? '🎉 全部批量文档的排版重构翻译已成功完成并自动下载！' : '🎉 All batch documents layout rebuild & translation successfully processed!');
   };
@@ -1538,91 +1561,181 @@ export default function App() {
     setTranslationFinished(false);
     setErrorMessage('');
     setResultPayload(null);
+    setWorkspaceResults([]);
 
-    // Support multi-file: iterate through all files
     const allFiles = files.length > 1 ? files : [files[0]];
-    
+
     for (let fi = 0; fi < allFiles.length; fi++) {
       const currentFile = allFiles[fi];
       if (!currentFile || currentFile.size === 0) continue;
 
+      setActiveIndex(fi);
       const sId = 'sess_' + Math.random().toString(36).substr(2, 9);
-      if (fi === 0) {
-        setSessionId(sId);
-        setProgressPercent(10);
-        setStagesMessage(currentLang === 'zh'
-          ? (allFiles.length > 1 ? `正在处理第 1/${allFiles.length} 个文件...` : '正在连接后端引擎...')
-          : (allFiles.length > 1 ? `Processing file 1/${allFiles.length}...` : 'Connecting to background translator...'));
-        startPollingProgress(sId);
-      }
+      setSessionId(sId);
+      setProgressPercent(10);
+      setStagesMessage(currentLang === 'zh'
+        ? (allFiles.length > 1 ? `正在处理第 ${fi + 1}/${allFiles.length} 个文件...` : '正在连接后端引擎...')
+        : (allFiles.length > 1 ? `Processing file ${fi + 1}/${allFiles.length}...` : 'Connecting to background translator...'));
+
+      startPollingProgress(sId, currentFile);
 
       const formData = new FormData();
       formData.append('file', currentFile);
-    formData.append('sourceLang', sourceLang);
-    formData.append('targetLang', targetLang);
-    formData.append('tone', tone);
-    formData.append('sessionId', sId);
+      formData.append('sourceLang', sourceLang);
+      formData.append('targetLang', targetLang);
+      formData.append('tone', tone);
+      formData.append('sessionId', sId);
 
-    if (useCustomApi) {
-      formData.append('customApiKey', customApi.apiKey);
-      formData.append('customBaseUrl', customApi.baseUrl);
-      formData.append('customModel', customApi.model);
-    }
+      if (useCustomApi) {
+        formData.append('customApiKey', customApi.apiKey);
+        formData.append('customBaseUrl', customApi.baseUrl);
+        formData.append('customModel', customApi.model);
+      }
 
-    try {
-      const response = await fetch('/api/translate', {
-        method: 'POST',
-        body: formData
-      });
+      try {
+        const response = await fetch('/api/translate', {
+          method: 'POST',
+          body: formData
+        });
 
-      if (!response.ok) {
-        clearInterval(progressPollingRef.current);
-        let errMsg = '';
-        try {
-          const errData = await response.json();
-          errMsg = errData.error;
-        } catch (_) {
+        if (!response.ok) {
+          clearInterval(progressPollingRef.current);
+          let errMsg = '';
           try {
-            errMsg = await response.text();
-          } catch (__) {
-            errMsg = currentLang === 'zh' ? '翻译服务端错误，请检查配置参数' : 'Translation server error, check parameters';
+            const errData = await response.json();
+            errMsg = errData.error;
+          } catch (_) {
+            try {
+              errMsg = await response.text();
+            } catch (__) {
+              errMsg = currentLang === 'zh' ? '翻译服务端错误，请检查配置参数' : 'Translation server error, check parameters';
+            }
           }
+          throw new Error(errMsg || (currentLang === 'zh' ? '翻译失败' : 'Translation failed'));
         }
-        throw new Error(errMsg || (currentLang === 'zh' ? '翻译失败' : 'Translation failed'));
-      }
-      // Wait for polling to retrieve the file
-    } catch (err: any) {
-      console.error(err);
-      const fallbackMessage = currentLang === 'zh'
-        ? '请求失败。请检查服务是否已启动、端口是否可达（当前默认 7050），以及网络/接口配置是否正常。'
-        : 'Request failed. Please verify that the service is running, port 7050 is reachable, and your network/provider settings are correct.';
-      const message = !err?.message || err.message === 'Failed to fetch' ? fallbackMessage : err.message;
-      setErrorMessage(message);
-      setIsTranslating(false);
-      clearInterval(progressPollingRef.current);
-      if (batchResolveRef.current) {
-        const resolveFn = batchResolveRef.current;
-        batchResolveRef.current = null;
-        resolveFn(false);
+
+        await handleDownloadCachedResult(sId, currentFile);
+      } catch (err: any) {
+        console.error(err);
+        const fallbackMessage = currentLang === 'zh'
+          ? '请求失败。请检查服务是否已启动、端口是否可达（当前默认 7050），以及网络/接口配置是否正常。'
+          : 'Request failed. Please verify that the service is running, port 7050 is reachable, and your network/provider settings are correct.';
+        const message = !err?.message || err.message === 'Failed to fetch' ? fallbackMessage : err.message;
+        setErrorMessage(message);
+        setIsTranslating(false);
+        clearInterval(progressPollingRef.current);
+        if (batchResolveRef.current) {
+          const resolveFn = batchResolveRef.current;
+          batchResolveRef.current = null;
+          resolveFn(false);
+        }
+        return;
       }
     }
-    }  // end for
   };
 
   // Downloader triggering
-  const downloadResult = () => {
-    if (!resultPayload) return;
-    
-    if (resultPayload.directDownloadBlob && resultPayload.directDownloadName) {
-      const url = window.URL.createObjectURL(resultPayload.directDownloadBlob);
+  const downloadResultPayload = (payload: ResultPayload) => {
+    if (payload.directDownloadBlob && payload.directDownloadName) {
+      const url = window.URL.createObjectURL(payload.directDownloadBlob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = resultPayload.directDownloadName;
+      a.download = payload.directDownloadName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
     }
+  };
+
+  const downloadResult = () => {
+    if (!resultPayload) return;
+    downloadResultPayload(resultPayload);
+  };
+
+  const appendWorkspaceResult = (item: WorkspaceResultItem) => {
+    setWorkspaceResults(prev => [...prev, item]);
+    setResultPayload(item.result);
+    setTranslationFinished(true);
+  };
+
+  const renderWorkspaceResultCard = (item: WorkspaceResultItem, index: number) => {
+    const payload = item.result;
+    return (
+      <div key={item.id} className="space-y-3 p-4 bg-zinc-950/25 rounded-xl border border-zinc-800/70">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-[10px] uppercase tracking-widest text-emerald-400 font-bold">
+              {currentLang === 'zh' ? `结果 ${index + 1}` : `Result ${index + 1}`}
+            </div>
+            <h5 className="text-xs font-semibold text-zinc-200 truncate">{item.sourceFileName}</h5>
+            <p className="text-[10px] text-zinc-500 mt-0.5">{item.format} • {item.targetLang}</p>
+          </div>
+        </div>
+
+        {payload.directDownloadBlob && (
+          <div className="p-4 bg-zinc-950/40 rounded-xl border border-zinc-800 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 bg-zinc-900 rounded-lg flex items-center justify-center border border-zinc-800">
+                <FileText className="w-5 h-5 text-indigo-400" />
+              </div>
+              <div>
+                <h5 className="text-xs font-semibold text-zinc-300 max-w-sm line-clamp-1">{payload.directDownloadName}</h5>
+                <p className="text-[10px] font-mono text-zinc-500 mt-0.5">Original Styling Reserved</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => downloadResultPayload(payload)}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-2 transition-colors cursor-pointer"
+            >
+              <Download className="w-4 h-4" />
+              <span>{t.downloadBtn}</span>
+            </button>
+          </div>
+        )}
+
+        {payload.pdfBase64 && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="p-4 bg-zinc-950/40 rounded-xl border border-zinc-800 flex flex-col justify-between">
+              <div className="flex items-start space-x-3 mb-3">
+                <FileText className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+                <div>
+                  <h6 className="text-xs font-semibold text-zinc-300">{t.pdfReport}</h6>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">Format Restored Document</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => downloadBase64File(payload.pdfBase64!, 'application/pdf', payload.outputName || 'Translated_Report.pdf')}
+                className="w-full py-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-300 rounded-lg text-xs font-medium flex items-center justify-center space-x-1.5 transition-colors cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 text-zinc-400" />
+                <span>Download PDF</span>
+              </button>
+            </div>
+
+            <div className="p-4 bg-zinc-950/40 rounded-xl border border-zinc-800 flex flex-col justify-between">
+              <div className="flex items-start space-x-3 mb-3">
+                <FileSpreadsheet className="w-5 h-5 text-indigo-400 shrink-0 mt-0.5" />
+                <div>
+                  <h6 className="text-xs font-semibold text-zinc-300">{t.bilingualText}</h6>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">Raw Text Alignment File</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => downloadBase64File(payload.docxBase64!, 'text/plain', payload.docxName || 'Bilingual_Text.txt')}
+                className="w-full py-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-300 rounded-lg text-xs font-medium flex items-center justify-center space-x-1.5 transition-colors cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 text-zinc-400" />
+                <span>Download TXT</span>
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
   };
 
   const downloadBase64File = (base64Data: string, mimeType: string, filename: string) => {
@@ -3100,85 +3213,21 @@ export default function App() {
               </div>
             )}
 
-            {translationFinished && resultPayload && (
-              <div id="workspace_success" className="animate-fade-in py-2">
+            {translationFinished && workspaceResults.length > 0 && (
+              <div id="workspace_success" className="animate-fade-in py-2 space-y-4">
                 <div className="flex items-center space-x-3 mb-4 bg-emerald-950/20 border border-emerald-900/30 p-4 rounded-xl">
                   <div className="w-10 h-10 bg-emerald-950 rounded-full flex items-center justify-center border border-emerald-800">
                     <CheckCircle className="w-5 h-5 text-emerald-400" />
                   </div>
                   <div>
                     <h4 className="text-sm font-semibold text-white">{t.completedTitle}</h4>
-                    <p className="text-xs text-zinc-400">{t.completedSub}</p>
+                    <p className="text-xs text-zinc-400">{currentLang === 'zh' ? `本次共完成 ${workspaceResults.length} 个翻译文件，按完成顺序展示如下。` : `${workspaceResults.length} translated files completed in this run, shown below in completion order.`}</p>
                   </div>
                 </div>
 
-                {/* Case A: File Output (Direct blobs from Word / PPTX / EPUB) */}
-                {resultPayload.directDownloadBlob && (
-                  <div className="p-4 bg-zinc-950/40 rounded-xl border border-zinc-800 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                    <div className="flex items-center space-x-3">
-                      <div className="w-10 h-10 bg-zinc-900 rounded-lg flex items-center justify-center border border-zinc-800">
-                        <FileText className="w-5 h-5 text-indigo-400" />
-                      </div>
-                      <div>
-                        <h5 className="text-xs font-semibold text-zinc-300 max-w-sm line-clamp-1">{resultPayload.directDownloadName}</h5>
-                        <p className="text-[10px] font-mono text-zinc-500 mt-0.5">Original Styling Reserved</p>
-                      </div>
-                    </div>
-                    
-                    <button 
-                      type="button"
-                      id="download_aligned_output"
-                      onClick={downloadResult}
-                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-2 transition-colors cursor-pointer"
-                    >
-                      <Download className="w-4 h-4" />
-                      <span>{t.downloadBtn}</span>
-                    </button>
-                  </div>
-                )}
-
-                {/* Case B: Double Output PDF format fallback representation */}
-                {resultPayload.pdfBase64 && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="p-4 bg-zinc-950/40 rounded-xl border border-zinc-800 flex flex-col justify-between">
-                      <div className="flex items-start space-x-3 mb-3">
-                        <FileText className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-                        <div>
-                          <h6 className="text-xs font-semibold text-zinc-300">{t.pdfReport}</h6>
-                          <p className="text-[10px] text-zinc-500 mt-0.5">Format Restored Document</p>
-                        </div>
-                      </div>
-                      <button 
-                        type="button"
-                        id="download_pdf_report"
-                        onClick={() => downloadBase64File(resultPayload.pdfBase64!, 'application/pdf', resultPayload.outputName || 'Translated_Report.pdf')}
-                        className="w-full py-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-300 rounded-lg text-xs font-medium flex items-center justify-center space-x-1.5 transition-colors cursor-pointer"
-                      >
-                        <Download className="w-3.5 h-3.5 text-zinc-400" />
-                        <span>Download PDF</span>
-                      </button>
-                    </div>
-
-                    <div className="p-4 bg-zinc-950/40 rounded-xl border border-zinc-800 flex flex-col justify-between">
-                      <div className="flex items-start space-x-3 mb-3">
-                        <FileSpreadsheet className="w-5 h-5 text-indigo-400 shrink-0 mt-0.5" />
-                        <div>
-                          <h6 className="text-xs font-semibold text-zinc-300">{t.bilingualText}</h6>
-                          <p className="text-[10px] text-zinc-500 mt-0.5">Raw Text Alignment File</p>
-                        </div>
-                      </div>
-                      <button 
-                        type="button"
-                        id="download_aligned_txt"
-                        onClick={() => downloadBase64File(resultPayload.docxBase64!, 'text/plain', resultPayload.docxName || 'Bilingual_Text.txt')}
-                        className="w-full py-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-300 rounded-lg text-xs font-medium flex items-center justify-center space-x-1.5 transition-colors cursor-pointer"
-                      >
-                        <Download className="w-3.5 h-3.5 text-zinc-400" />
-                        <span>Download TXT</span>
-                      </button>
-                    </div>
-                  </div>
-                )}
+                <div className="space-y-4 max-h-[520px] overflow-y-auto pr-1">
+                  {workspaceResults.map((item, index) => renderWorkspaceResultCard(item, index))}
+                </div>
               </div>
             )}
           </div>
