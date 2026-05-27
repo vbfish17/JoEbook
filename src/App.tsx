@@ -162,7 +162,7 @@ const llmPresets: LlmPreset[] = [
 const translations = {
   zh: {
     title: "JoEbook",
-    version: "v1.0.0",
+    version: "v1.1.0",
     subTitle: "保留版式的本地文档智能翻译工具 (Bento Grid)",
     tagline: "全格式 (PDF, Word, PPTX, EPUB, MD) 本地无损翻译与排版对齐重建",
 
@@ -222,7 +222,7 @@ const translations = {
   },
   en: {
     title: "JoEbook",
-    version: "v1.0.0",
+    version: "v1.1.0",
     subTitle: "Structure-Preserving Intelligent Document Translator (Bento Grid)",
     tagline: "Lossless layout-aligned translation for PDF, DOCX, PPTX, EPUB, and Markdown",
 
@@ -461,6 +461,7 @@ export default function App() {
   const [isRepacking, setIsRepacking] = useState<boolean>(false);
   const [confirmExit, setConfirmExit] = useState<boolean>(false);
   const [showRepackConfirm, setShowRepackConfirm] = useState<boolean>(false);
+  const [showClearConfirm, setShowClearConfirm] = useState<boolean>(false);
 
   // JoEbook editor utilities: find and replace across the bilingual workspace
   const [findQuery, setFindQuery] = useState<string>('');
@@ -567,7 +568,19 @@ export default function App() {
     return ''; // empty = use source file directory
   };
 
-  // Sync save path to Electron main process (DMG only)
+  // Helper: send source file directory to Electron main (DMG only)
+const syncSourceDir = (fileList: File[]) => {
+  const win = window as any;
+  if (win.electronAPI?.setSourceDir && fileList.length > 0) {
+    const firstFile = fileList[0];
+    // In Electron, file.path gives full filesystem path; extract directory
+    if ((firstFile as any).path) {
+      const fullPath = (firstFile as any).path;
+      const dir = fullPath.substring(0, fullPath.lastIndexOf('/'));
+      win.electronAPI.setSourceDir(dir).catch(() => {});
+    }
+  }
+};
   useEffect(() => {
     const win = window as any;
     if (win.electronAPI?.setSavePath) {
@@ -767,7 +780,17 @@ export default function App() {
     }
 
     if (validFiles.length > 0) {
-      setFiles(validFiles);
+      setFiles(prev => {
+        const merged = [...prev, ...validFiles];
+        syncSourceDir(merged);
+        // Warn if total exceeds 10
+        if (merged.length > 10 && !customError) {
+          customError = currentLang === 'zh' 
+            ? `⚠️ 当前文件列表共 ${merged.length} 个文档，超过 10 个建议分批次翻译以确保稳定性。`
+            : `⚠️ ${merged.length} files in queue. For stability, consider splitting into batches of 10 or fewer.`;
+        }
+        return merged;
+      });
       setActiveIndex(0);
       setErrorMessage(customError);
       setTranslationFinished(false);
@@ -802,6 +825,11 @@ export default function App() {
 
   // Clear current upload (compatible helper)
   const removeFile = () => {
+    setShowClearConfirm(true);
+  };
+
+  const confirmClearFiles = () => {
+    setShowClearConfirm(false);
     setFiles([]);
     setActiveIndex(0);
     setTranslationFinished(false);
@@ -1888,6 +1916,39 @@ export default function App() {
           </div>
         </div>
       )}
+      {showClearConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 animate-fade-in font-sans">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-md w-full p-6 shadow-2xl relative">
+            <div className="flex items-center space-x-3 text-red-500 mb-4">
+              <Trash2 className="w-6 h-6 shrink-0" />
+              <h3 className="text-base font-bold text-white">
+                {currentLang === 'zh' ? '确认清空文件列表' : 'Clear File List'}
+              </h3>
+            </div>
+            <p className="text-xs text-zinc-300 leading-relaxed mb-6">
+              {currentLang === 'zh' 
+                ? `当前文件列表中有 ${files.length} 个文档。清空后当前文件列表及翻译状态将全部丢失，确定要清空吗？`
+                : `There are ${files.length} files in the queue. Clearing will discard all files and translation state. Are you sure?`}
+            </p>
+            <div className="flex items-center justify-end space-x-2">
+              <button
+                type="button"
+                onClick={() => setShowClearConfirm(false)}
+                className="px-4 py-2 bg-zinc-800 hover:bg-zinc-750 text-zinc-300 rounded-lg text-xs font-semibold cursor-pointer transition-colors border border-zinc-700/55"
+              >
+                {currentLang === 'zh' ? '取消' : 'Cancel'}
+              </button>
+              <button
+                type="button"
+                onClick={confirmClearFiles}
+                className="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-bold cursor-pointer transition-colors shadow-lg shadow-red-600/10"
+              >
+                {currentLang === 'zh' ? '确定清空' : 'Clear All'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Bento Grid Containers */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
@@ -2740,7 +2801,7 @@ export default function App() {
 
           <div className="mt-4 pt-4 border-t border-zinc-800/60 text-[11px] text-zinc-500 flex items-center justify-between">
             <span>PDF: High precision • DOCX / PPTX: Block-aligned rebuilds</span>
-            <span>v1.0.0</span>
+            <span>v1.1.0</span>
           </div>
         </div>
 

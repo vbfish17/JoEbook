@@ -11,7 +11,34 @@ import { execFile, execSync } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
-const PDF2ZH_PYTHON = '/Users/lian/miniforge3/bin/python3';
+
+// Auto-detect available Python interpreter — try multiple common locations
+function findPython(): string {
+  const candidates = [
+    '/Users/lian/miniforge3/bin/python3',
+    '/usr/local/bin/python3',
+    '/opt/homebrew/bin/python3',
+    '/usr/bin/python3',
+    'python3',
+    'python'
+  ];
+  for (const py of candidates) {
+    try {
+      execSync(`${py} --version`, { stdio: 'pipe', timeout: 3000 });
+      return py;
+    } catch { continue; }
+  }
+  return 'python3'; // fallback, will fail gracefully later
+}
+const PDF2ZH_PYTHON = findPython();
+
+function scriptExists(name: string): boolean {
+  try {
+    const p = path.resolve(process.cwd(), name);
+    return fs.existsSync(p) && fs.statSync(p).isFile();
+  } catch { return false; }
+}
+
 const PDF2ZH_SCRIPT = path.resolve(process.cwd(), 'scripts/pdf_translate_via_pdf2zh.py');
 
 type CustomApiConfig = { apiKey?: string; baseUrl?: string; model?: string };
@@ -1573,9 +1600,10 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
         outputName = originalName.replace(/\.md$/i, `_${targetLang}.md`);
       } else if (ext === '.pdf') {
         let pdfOut;
-        const hasPython = (() => { try { execSync('python3 --version', {stdio:'pipe'}); return true; } catch { return false; } })();
-        if (!hasPython) {
-          updateProgress(15, '使用内置 PDF 翻译引擎...');
+        const hasPython = (() => { try { execSync(`${PDF2ZH_PYTHON} --version`, {stdio:'pipe', timeout:3000}); return true; } catch { return false; } })();
+        const canRunPythonScripts = hasPython && scriptExists('scripts/pdf_translate_workflow.py') && scriptExists('scripts/pdf_translate_via_pymupdf.py') && scriptExists('scripts/pdf_translate_via_pdf2zh.py');
+        if (!canRunPythonScripts) {
+          updateProgress(15, '使用内置 PDF 翻译引擎（纯 Node.js 无外部依赖）...');
           pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
         } else {
           // Python available: try V3 direct workflow first (逐 span API 翻译 + 白底黑字覆盖 + 术语修正)

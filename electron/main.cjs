@@ -8,11 +8,16 @@ let mainWindow = null;
 
 // IPC: Save path management
 let userSavePath = '';
+let sourceDir = ''; // auto-detected from source file (DMG only)
 ipcMain.handle('get-save-path', () => {
   return userSavePath || '';
 });
 ipcMain.handle('set-save-path', (_event, savePath) => {
   userSavePath = savePath;
+  return true;
+});
+ipcMain.handle('set-source-dir', (_event, dirPath) => {
+  sourceDir = dirPath || '';
   return true;
 });
 
@@ -55,7 +60,8 @@ function createWindow() {
   // Intercept downloads: save without prompting dialog
   mainWindow.webContents.session.on('will-download', (_event, item) => {
     const defaultDir = app.getPath('downloads');
-    const targetDir = userSavePath || defaultDir;
+    // Priority: custom path > source file directory > Downloads
+    const targetDir = userSavePath || sourceDir || defaultDir;
     
     if (!fs.existsSync(targetDir)) {
       try { fs.mkdirSync(targetDir, { recursive: true }); } catch (_) {}
