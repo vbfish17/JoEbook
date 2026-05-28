@@ -337,6 +337,17 @@ export default function App() {
   const [batchCurrentIndex, setBatchCurrentIndex] = useState<number>(0);
   const [nextBatchIdxToStart, setNextBatchIdxToStart] = useState<number | null>(null);
   const batchResolveRef = useRef<((value: boolean) => void) | null>(null);
+
+  // Unified translation state reset
+  const resetTranslationState = () => {
+    setIsTranslating(false);
+    setIsBatchProcessing(false);
+    setProgressPercent(0);
+    setStagesMessage('');
+    setBatchCurrentIndex(0);
+    setNextBatchIdxToStart(null);
+    clearInterval(progressPollingRef.current);
+  };
   const [sourceLang, setSourceLang] = useState<string>('Auto');
   const [targetLang, setTargetLang] = useState<string>('Chinese (Simplified)');
   const [tone, setTone] = useState<string>('professional');
@@ -424,6 +435,9 @@ export default function App() {
   const [stagesMessage, setStagesMessage] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [translationFinished, setTranslationFinished] = useState<boolean>(false);
+
+  // Source directory path (extracted from File.path when adding files via <input>)
+  const [sourceDirPath, setSourceDirPath] = useState<string>('');
 
   // Interactive Proofreading State
   const [isInteractiveMode, setIsInteractiveMode] = useState<boolean>(false);
@@ -727,6 +741,15 @@ const syncSourceDir = (fileList: File[]) => {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
+      // Immediately extract source directory from the first file's path (Electron only)
+      const win = window as any;
+      const firstFile = e.target.files[0];
+      if (win.electronAPI?.setSourceDir && (firstFile as any).path) {
+        const fullPath = (firstFile as any).path;
+        const dir = fullPath.substring(0, fullPath.lastIndexOf('/'));
+        setSourceDirPath(dir);
+        win.electronAPI.setSourceDir(dir).catch(() => {});
+      }
       validateAndAddFiles(e.target.files);
     }
   };
@@ -796,6 +819,7 @@ const syncSourceDir = (fileList: File[]) => {
       setTranslationFinished(false);
       setResultPayload(null);
       setWorkspaceResults([]);
+      resetTranslationState();
     } else if (customError) {
       setErrorMessage(customError);
     }
@@ -1553,27 +1577,26 @@ const syncSourceDir = (fileList: File[]) => {
     setResultPayload(null);
     setErrorMessage('');
 
-    for (let i = 0; i < files.length; i++) {
-      setBatchCurrentIndex(i);
-      setActiveIndex(i);
-
-      // Wait a small moment to let React re-render active Tab and update File closures
-      await new Promise(resolve => setTimeout(resolve, 250));
-
-      const success = await new Promise<boolean>((resolve) => {
-        batchResolveRef.current = resolve;
-        setNextBatchIdxToStart(i);
-      });
-
-      // Wait a moment for layout/completion feedback before switching to next file
-      await new Promise(resolve => setTimeout(resolve, 1500));
+    try {
+      for (let i = 0; i < files.length; i++) {
+        setBatchCurrentIndex(i);
+        setActiveIndex(i);
+        await new Promise(resolve => setTimeout(resolve, 250));
+        const success = await new Promise<boolean>((resolve) => {
+          batchResolveRef.current = resolve;
+          setNextBatchIdxToStart(i);
+        });
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      }
+      setTranslationFinished(true);
+      setProgressPercent(100);
+      setStagesMessage(currentLang === 'zh' ? '🎉 全部批量文档的排版重构翻译已成功完成并自动下载！' : '🎉 All batch documents layout rebuild & translation successfully processed!');
+    } catch (err) {
+      console.error('Batch translation error:', err);
+      setErrorMessage(currentLang === 'zh' ? '批量翻译过程中出错' : 'Error during batch translation');
+    } finally {
+      resetTranslationState();
     }
-
-    setIsBatchProcessing(false);
-    setIsTranslating(false);
-    setTranslationFinished(true);
-    setProgressPercent(100);
-    setStagesMessage(currentLang === 'zh' ? '🎉 全部批量文档的排版重构翻译已成功完成并自动下载！' : '🎉 All batch documents layout rebuild & translation successfully processed!');
   };
 
   // Translation Trigger Action
@@ -1661,16 +1684,16 @@ const syncSourceDir = (fileList: File[]) => {
           : 'Request failed. Please verify that the service is running, port 7050 is reachable, and your network/provider settings are correct.';
         const message = !err?.message || err.message === 'Failed to fetch' ? fallbackMessage : err.message;
         setErrorMessage(message);
-        setIsTranslating(false);
         clearInterval(progressPollingRef.current);
         if (batchResolveRef.current) {
           const resolveFn = batchResolveRef.current;
           batchResolveRef.current = null;
           resolveFn(false);
         }
-        return;
+      } finally {
+        resetTranslationState();
       }
-    }
+    } // end for loop
   };
 
   // Downloader triggering
@@ -3044,54 +3067,6 @@ const syncSourceDir = (fileList: File[]) => {
                   )}
                 </AnimatePresence>
 
-                {isDMG && (
-                /* Save Location Setting */
-                <div className="mt-4 pt-4 border-t border-zinc-800/60">
-                  <h4 className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider mb-3 flex items-center gap-2">
-                    <FolderOpen className="w-3.5 h-3.5 text-indigo-400" />
-                    {t.saveLocation}
-                  </h4>
-                  <div className="space-y-2">
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="radio"
-                        name="saveMode"
-                        checked={saveMode === 'source'}
-                        onChange={() => setSaveMode('source')}
-                        className="w-3.5 h-3.5 text-indigo-500 bg-zinc-900 border-zinc-700 focus:ring-indigo-500"
-                      />
-                      <span className="text-xs text-zinc-300">{t.saveLocationSource}</span>
-                    </label>
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="radio"
-                        name="saveMode"
-                        checked={saveMode === 'custom'}
-                        onChange={() => setSaveMode('custom')}
-                        className="w-3.5 h-3.5 text-indigo-500 bg-zinc-900 border-zinc-700 focus:ring-indigo-500"
-                      />
-                      <span className="text-xs text-zinc-300">{t.saveLocationCustom}</span>
-                    </label>
-                    {saveMode === 'custom' && (
-                      <div className="pl-6">
-                        <input
-                          type="text"
-                          id="custom_save_path"
-                          value={customSavePath}
-                          onChange={(e) => setCustomSavePath(e.target.value)}
-                          placeholder={t.saveLocationPlaceholder}
-                          className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500 font-mono mt-1"
-                        />
-                      </div>
-                    )}
-                  </div>
-                  {t.saveLocationNote && (
-                    <p className="text-[9px] text-zinc-600 mt-2 leading-relaxed">
-                      {t.saveLocationNote}
-                    </p>
-                  )}
-                </div>
-                )}
 
               </div>
               <div className="mt-4 text-[10px] text-zinc-500 border-t border-zinc-800/40 pt-3">

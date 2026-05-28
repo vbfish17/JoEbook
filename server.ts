@@ -12,6 +12,19 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 
+// Resolve the app root directory: in Electron DMG, __dirname is the dist/ folder;
+// in dev mode (tsx), process.cwd() is the project root.
+function getAppRoot(): string {
+  // Check if we're running in the compiled dist/ directory (Electron production)
+  if (typeof __dirname !== 'undefined' && __dirname.includes('/dist')) {
+    return path.resolve(__dirname, '..');
+  }
+  // In development (tsx), use cwd
+  return process.cwd();
+}
+
+const APP_ROOT = getAppRoot();
+
 // Auto-detect available Python interpreter — try multiple common locations
 function findPython(): string {
   const candidates = [
@@ -34,12 +47,40 @@ const PDF2ZH_PYTHON = findPython();
 
 function scriptExists(name: string): boolean {
   try {
-    const p = path.resolve(process.cwd(), name);
+    const p = path.resolve(APP_ROOT, name);
     return fs.existsSync(p) && fs.statSync(p).isFile();
   } catch { return false; }
 }
 
-const PDF2ZH_SCRIPT = path.resolve(process.cwd(), 'scripts/pdf_translate_via_pdf2zh.py');
+// In Electron DMG, scripts are in asar.unpacked (not inside the asar archive).
+// Python child processes cannot read from asar archives — they need real filesystem paths.
+// This function converts an asar-internal path to the real .asar.unpacked/ path.
+function realScriptPath(name: string): string {
+  const p = path.resolve(APP_ROOT, name);
+  // Electron fs patch handles asar → unpacked mapping for Node.js fs,
+  // but Python subprocesses need the real .asar.unpacked/ path.
+  if (p.includes('.asar/')) {
+    const unpacked = p.replace('.asar/', '.asar.unpacked/');
+    if (fs.existsSync(unpacked)) return unpacked;
+  }
+  return p;
+}
+
+// Get real filesystem path for cwd in Python subprocesses (can't be inside asar)
+function realAppRoot(): string {
+  if (APP_ROOT.includes('.asar/')) {
+    const unpacked = APP_ROOT.replace('.asar/', '.asar.unpacked/');
+    if (fs.existsSync(unpacked)) return unpacked;
+  } else if (APP_ROOT.includes('.asar')) {
+    // Edge case: APP_ROOT ends with .asar (the archive itself)
+    const unpacked = APP_ROOT.replace('.asar', '.asar.unpacked');
+    if (fs.existsSync(unpacked)) return unpacked;
+  }
+  return APP_ROOT;
+}
+const APP_ROOT_REAL = realAppRoot();
+
+const PDF2ZH_SCRIPT = realScriptPath('scripts/pdf_translate_via_pdf2zh.py');
 
 type CustomApiConfig = { apiKey?: string; baseUrl?: string; model?: string };
 
@@ -90,7 +131,7 @@ async function translatePdfViaPdf2zh(
     ];
 
     const { stdout, stderr } = await execFileAsync(PDF2ZH_PYTHON, args, {
-      cwd: process.cwd(),
+      cwd: APP_ROOT_REAL,
       maxBuffer: 20 * 1024 * 1024,
     });
 
@@ -121,7 +162,7 @@ async function translatePdfViaPdf2zh(
   }
 }
 
-const PYMUPDF_SCRIPT = path.resolve(process.cwd(), 'scripts/pdf_translate_via_pymupdf.py');
+const PYMUPDF_SCRIPT = realScriptPath('scripts/pdf_translate_via_pymupdf.py');
 
 function canUsePymupdf(customApi?: CustomApiConfig): boolean {
   return !!(customApi?.baseUrl && customApi?.model);
@@ -156,7 +197,7 @@ async function translatePdfViaPymupdf(
     ];
 
     const { stdout, stderr } = await execFileAsync(PDF2ZH_PYTHON, args, {
-      cwd: process.cwd(),
+      cwd: APP_ROOT_REAL,
       maxBuffer: 10 * 1024 * 1024,
     });
 
@@ -1463,33 +1504,47 @@ async function translatePdf(
   };
 }
 
-// ── translatePdfViaDirectV3: Python 逐 span API 翻译 + 白底黑字覆盖 + 术语修正 ──
-const DIRECT_V3_SCRIPT = path.resolve(process.cwd(), 'scripts/pdf_translate_workflow.py');
+// ── translatePdfViaWorkflow: unified v3 workflow (page-wise API + white-rect overlay + glossary) ──
+const WORKFLOW_SCRIPT = realScriptPath('scripts/pdf_translate_workflow.py');
 
-async function translatePdfViaDirectV3(
+async function translatePdfViaWorkflow(
   fileBuffer: Buffer,
   progress: (msg: string) => void,
+  customApi: CustomApiConfig,
+  sourceLang: string | undefined,
   targetLang: string
 ): Promise<{ docxBuffer: Buffer; pdfBuffer: Buffer; textContent: string }> {
-  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'joebook-directv3-'));
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'joebook-workflow-'));
   const inputPath = path.join(tempDir, 'input.pdf');
-  const outputPath = path.join(tempDir, 'input_zh_glossary.pdf');
+  const outputPath = path.join(tempDir, 'output.pdf');
 
   try {
     await fs.promises.writeFile(inputPath, fileBuffer);
-    console.log('[directV3] Starting Python script...');
-    progress('已切换到 Python 逐页高保真 PDF 翻译引擎（逐页识别 + 白底黑字覆盖 + 术语修正）...');
+    progress('启动 PDF 高保真翻译引擎（逐 span 识别 + 白底黑字精细覆盖 + 专业术语修正）...');
 
-    // Use --output to pass explicit output path
-    const args = [DIRECT_V3_SCRIPT, inputPath, '--output', outputPath];
+    const args = [
+      WORKFLOW_SCRIPT,
+      inputPath,
+      '--output', outputPath,
+      '--base-url', String(customApi?.baseUrl || 'http://127.0.0.1:1234/v1').trim(),
+      '--model', String(customApi?.model || 'gemma-4-e4b-it-mlx').trim(),
+      '--api-key', customApi?.apiKey || 'not-required',
+      '--lang-in', normalizePdf2zhLang(sourceLang),
+      '--lang-out', normalizePdf2zhLang(targetLang),
+      '--timeout', '120',
+      '--batch-size', '10',
+    ];
+
+    console.log('[workflow] args:', args.slice(0, -3).join(' '), '...');
     const { stdout, stderr } = await execFileAsync(PDF2ZH_PYTHON, args, {
-      cwd: process.cwd(),
-      maxBuffer: 20 * 1024 * 1024,
-      timeout: 600000, // 10 minutes for large PDFs
+      cwd: APP_ROOT_REAL,
+      maxBuffer: 50 * 1024 * 1024,
+      timeout: 900000, // 15 minutes for large PDFs
     });
-    if (stderr?.trim()) console.warn('[directV3 stderr]', stderr.trim());
-    console.log('[directV3 stdout]', stdout.trim());
+    if (stderr?.trim()) console.warn('[workflow stderr]', stderr.trim());
+    console.log('[workflow stdout]', stdout.trim());
 
+    // Read output PDF
     let pdfBuffer: Buffer;
     if (fs.existsSync(outputPath)) {
       pdfBuffer = await fs.promises.readFile(outputPath);
@@ -1498,19 +1553,25 @@ async function translatePdfViaDirectV3(
       const fallbackPath = path.join(tempDir, 'input_zh_translated.pdf');
       pdfBuffer = fs.existsSync(fallbackPath)
         ? await fs.promises.readFile(fallbackPath)
-        : await fs.promises.readFile(inputPath); // last resort: original
+        : fileBuffer; // last resort: return original
     }
 
     // Extract text content for docx output
     let textContent = '';
     try {
-      const pdfParseMod = await import('pdf-parse');
-      const parser = new pdfParseMod.PDFParse({ data: new Uint8Array(pdfBuffer) });
-      const result = await parser.getText();
-      textContent = result.pages.map((p: any) => p.text).join('\n');
+      const resultJsonPath = path.join(tempDir, 'output_result.json');
+      if (fs.existsSync(resultJsonPath)) {
+        const meta = JSON.parse(await fs.promises.readFile(resultJsonPath, 'utf8'));
+        textContent = JSON.stringify(meta, null, 2);
+      } else {
+        const pdfParseMod = await import('pdf-parse');
+        const parser = new pdfParseMod.PDFParse({ data: new Uint8Array(pdfBuffer) });
+        const result = await parser.getText();
+        textContent = result.pages.map((p: any) => p.text).join('\n');
+      }
     } catch { textContent = '(text extraction unavailable)'; }
 
-    progress('PDF 高保真翻译完成');
+    progress(`PDF 高保真翻译完成：${pdfBuffer.length} bytes`);
     return {
       docxBuffer: Buffer.from(textContent, 'utf8'),
       pdfBuffer,
@@ -1606,45 +1667,44 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
           updateProgress(15, '使用内置 PDF 翻译引擎（纯 Node.js 无外部依赖）...');
           pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
         } else {
-          // Python available: try V3 direct workflow first (逐 span API 翻译 + 白底黑字覆盖 + 术语修正)
+          // Python available: run unified workflow (逐 span API 翻译 + 白底黑字精确覆盖 + 术语修正)
           try {
-            updateProgress(15, '使用 Python 高保真工作流（逐 span 翻译 + 白底黑字覆盖）...');
-            pdfOut = await translatePdfViaDirectV3(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), targetLang);
-          } catch (directErr: any) {
-            console.warn('[directV3 fallback]', directErr?.message || directErr);
+            updateProgress(15, '使用 Python 高保真工作流（逐 span 识别 + 白底黑字精细覆盖 + 专业术语修正）...');
+            pdfOut = await translatePdfViaWorkflow(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi || {}, sourceLang, targetLang);
+          } catch (workflowErr: any) {
+            console.warn('[workflow fallback]', workflowErr?.message || workflowErr);
             // Fallback to PyMuPDF if custom API is configured
             if (canUsePymupdf(customApi)) {
               try {
-                updateProgress(35, 'Direct V3 路线失败，已自动回退到 PyMuPDF 引擎...');
+                updateProgress(35, 'High-fidelity workflow failed, falling back to PyMuPDF engine...');
                 pdfOut = await translatePdfViaPymupdf(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
               } catch (pymupdfErr: any) {
                 console.warn('[pymupdf fallback]', pymupdfErr?.message || pymupdfErr);
-                // Fallback to pdf2zh
                 if (canUsePdf2zh(customApi)) {
                   try {
-                    updateProgress(45, 'PyMuPDF 路线也失败，已自动回退到 PDFMathTranslate 引擎...');
+                    updateProgress(45, 'PyMuPDF failed, falling back to PDFMathTranslate engine...');
                     pdfOut = await translatePdfViaPdf2zh(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
                   } catch (pdf2zhErr: any) {
                     console.warn('[pdf2zh fallback]', pdf2zhErr?.message || pdf2zhErr);
-                    updateProgress(55, '所有 Python 路线均失败，已自动回退到基础 PDF 重排翻译引擎...');
+                    updateProgress(55, 'All Python engines failed, falling back to basic text-only PDF rebuilder...');
                     pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
                   }
                 } else {
-                  updateProgress(45, '未提供 pdf2zh 自定义模型配置，已自动回退到基础 PDF 重排翻译引擎...');
+                  updateProgress(45, 'No pdf2zh API config, falling back to basic text-only PDF rebuilder...');
                   pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
                 }
               }
             } else if (canUsePdf2zh(customApi)) {
               try {
-                updateProgress(35, 'Direct V3 路线失败，已自动回退到 PDFMathTranslate 引擎...');
+                updateProgress(35, 'High-fidelity workflow failed, falling back to PDFMathTranslate engine...');
                 pdfOut = await translatePdfViaPdf2zh(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
               } catch (pdf2zhErr: any) {
                 console.warn('[pdf2zh fallback]', pdf2zhErr?.message || pdf2zhErr);
-                updateProgress(45, 'PDFMathTranslate 路线失败，已自动回退到基础 PDF 重排翻译引擎...');
+                updateProgress(45, 'PDFMathTranslate failed, falling back to basic text-only PDF rebuilder...');
                 pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
               }
             } else {
-              updateProgress(35, '无可用自定义 API 配置，使用基础 PDF 重排翻译引擎...');
+              updateProgress(35, 'No custom API config available, using basic text-only PDF rebuilder...');
               pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
             }
           }
@@ -2455,7 +2515,7 @@ const startExpress = async () => {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`JoEbook running locally on http://localhost:${PORT}`);
-    console.log('[startup] DirectV3 available:', typeof translatePdfViaDirectV3 !== 'undefined');
+    console.log('[startup] Workflow available:', scriptExists('scripts/pdf_translate_workflow.py'));
     console.log('[startup] hasPython check:', (() => { try { require('child_process').execSync('python3 --version'); return true; } catch { return false; } })());
   });
 };

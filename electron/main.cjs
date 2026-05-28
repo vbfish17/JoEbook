@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, session } = require('electron');
+const { app, BrowserWindow, ipcMain, session, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { fork } = require('child_process');
@@ -18,7 +18,37 @@ ipcMain.handle('set-save-path', (_event, savePath) => {
 });
 ipcMain.handle('set-source-dir', (_event, dirPath) => {
   sourceDir = dirPath || '';
+  console.log('[set-source-dir] sourceDir set to:', sourceDir);
   return true;
+});
+
+// IPC: Save base64-encoded file to the correct save path directory
+ipcMain.handle('save-base64-file', async (_event, base64Data, fileName, mimeType) => {
+  const defaultDir = app.getPath('downloads');
+  const targetDir = userSavePath || sourceDir || defaultDir;
+  
+  console.log('[save-base64-file] userSavePath:', userSavePath, 'sourceDir:', sourceDir, 'targetDir:', targetDir, 'fileName:', fileName);
+  
+  if (!fs.existsSync(targetDir)) {
+    try { fs.mkdirSync(targetDir, { recursive: true }); } catch (_) {}
+  }
+  
+  const filePath = path.join(targetDir, fileName);
+  const buffer = Buffer.from(base64Data, 'base64');
+  fs.writeFileSync(filePath, buffer);
+  console.log('Base64 file saved to:', filePath);
+  return filePath;
+});
+
+// IPC: Open native directory picker dialog
+ipcMain.handle('select-directory', async () => {
+  if (!mainWindow) return null;
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    title: '选择文件保存目录'
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
 });
 
 function startServer() {
