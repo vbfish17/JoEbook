@@ -162,7 +162,7 @@ const llmPresets: LlmPreset[] = [
 const translations = {
   zh: {
     title: "JoEbook",
-    version: "v1.1.0",
+    version: "v1.3.0",
     subTitle: "保留版式的本地文档智能翻译工具 (Bento Grid)",
     tagline: "全格式 (PDF, Word, PPTX, EPUB, MD) 本地无损翻译与排版对齐重建",
 
@@ -222,7 +222,7 @@ const translations = {
   },
   en: {
     title: "JoEbook",
-    version: "v1.1.0",
+    version: "v1.3.0",
     subTitle: "Structure-Preserving Intelligent Document Translator (Bento Grid)",
     tagline: "Lossless layout-aligned translation for PDF, DOCX, PPTX, EPUB, and Markdown",
 
@@ -2824,7 +2824,7 @@ const syncSourceDir = (fileList: File[]) => {
 
           <div className="mt-4 pt-4 border-t border-zinc-800/60 text-[11px] text-zinc-500 flex items-center justify-between">
             <span>PDF: High precision • DOCX / PPTX: Block-aligned rebuilds</span>
-            <span>v1.1.0</span>
+            <span>v1.3.0</span>
           </div>
         </div>
 

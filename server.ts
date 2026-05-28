@@ -2405,7 +2405,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Add package.json
     const packageJsonContent = JSON.stringify({
       name: "joebook-mac-kit",
-      version: "1.0.0",
+      version: "1.3.0",
       description: "JoEbook native macOS DMG packaging workspace",
       main: "main.js",
       scripts: {
