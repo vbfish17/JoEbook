@@ -83,6 +83,30 @@ const APP_ROOT_REAL = realAppRoot();
 const PDF2ZH_SCRIPT = realScriptPath('scripts/pdf_translate_via_pdf2zh.py');
 
 type CustomApiConfig = { apiKey?: string; baseUrl?: string; model?: string };
+type AgentRole = 'planner' | 'executor' | 'proofreader';
+type AgentPlanPayload = {
+  roles?: Record<AgentRole, { count?: number; api?: CustomApiConfig }>;
+  summary?: string;
+};
+
+function parseJsonField<T>(value: any): T | undefined {
+  if (!value) return undefined;
+  try {
+    return typeof value === 'string' ? JSON.parse(value) : value;
+  } catch {
+    return undefined;
+  }
+}
+
+function apiForRole(plan: AgentPlanPayload | undefined, role: AgentRole, fallback?: CustomApiConfig): CustomApiConfig | undefined {
+  const roleApi = plan?.roles?.[role]?.api;
+  if (!roleApi) return fallback;
+  return {
+    apiKey: roleApi.apiKey || fallback?.apiKey,
+    baseUrl: roleApi.baseUrl || fallback?.baseUrl,
+    model: roleApi.model || fallback?.model,
+  };
+}
 
 function normalizePdf2zhLang(value: string | undefined): string {
   const text = String(value || '').trim().toLowerCase();
@@ -552,7 +576,8 @@ export async function translateTextBatch(
   targetLang: string,
   tone: string,
   customApi?: { apiKey?: string; baseUrl?: string; model?: string },
-  isRecursive = false
+  isRecursive = false,
+  glossaryTerms?: { source: string; target: string }[]
 ): Promise<string[]> {
   const sourceText = sourceLang === 'Auto' ? 'auto-detected language' : sourceLang;
   const normalizedModel = (customApi?.model || '').toLowerCase();
@@ -573,6 +598,14 @@ CRITICAL RULES:
 3. Keep all technical terms, markup tags, HTML sub-elements, inline style tokens, variables, or braces (e.g. {1}) exactly as they are. Translate only the surrounding natural text.
 4. If a block consists entirely of numbers, code syntax, empty spaces, or placeholder characters, return it unchanged.
 5. Return ONLY the JSON response - do not decorate it with markdown codeblocks or other chat text.`;
+
+  // ── 术语记忆注入：如果有术语表，追加到 systemInstruction ──
+  let finalSystemInstruction = systemInstruction;
+  if (glossaryTerms && glossaryTerms.length > 0) {
+    const glossaryLines = glossaryTerms.map(t => `   ${t.source} → ${t.target}`).join('\n');
+    const glossaryBlock = `6. TERMINOLOGY MAPPING (MANDATORY): When translating, you MUST use the following term mappings exactly. If a source term appears in the text, translate it to the specified target term without exception:\n${glossaryLines}`;
+    finalSystemInstruction = systemInstruction + '\n\n' + glossaryBlock;
+  }
 
   const buildTranslateGemmaPrompt = (text: string) => `<<<source>>>${sourceText}<<<target>>>${targetLang}<<<text>>>${text}`;
 
@@ -619,7 +652,7 @@ CRITICAL RULES:
           model: modelToUse,
           contents: prompt,
           config: {
-            systemInstruction: systemInstruction,
+            systemInstruction: finalSystemInstruction,
             temperature: 0.3,
             responseMimeType: "application/json",
             responseSchema: {
@@ -662,8 +695,16 @@ CRITICAL RULES:
         if (useTranslateGemmaMode) {
           console.log('[TranslateGemma] mode ON', { model, baseUrl, count: texts.length, sourceText, targetLang });
           const translatedResults: string[] = [];
+
+          // ── 术语记忆提示（TranslateGemma 模式） ──
+          let glossaryHint = '';
+          if (glossaryTerms && glossaryTerms.length > 0) {
+            const mappings = glossaryTerms.map(t => `${t.source} → ${t.target}`).join(', ');
+            glossaryHint = ` [TERMINOLOGY: You MUST use these term mappings: ${mappings}]`;
+          }
+
           for (const text of texts) {
-            const promptText = `Translate strictly and return only the final translation with no explanation. ${buildTranslateGemmaPrompt(text)}`;
+            const promptText = `Translate strictly and return only the final translation with no explanation.${glossaryHint} ${buildTranslateGemmaPrompt(text)}`;
             const bodyObj = {
               model,
               messages: [
@@ -708,11 +749,11 @@ CRITICAL RULES:
 
         const prompt = `Translate the following text items. \nInput items list (JSON formatted):\n${JSON.stringify({ paragraphs: texts }, null, 2)}\n\nReturn a JSON with the key "translations" containing the array of translations in the exact same sequence. No explanations and no Markdown blocks.`;
 
-        const makeRequest = async (includeJsonFormat: boolean) => {
-          const bodyObj: any = {
-            model: model,
-            messages: [
-              { role: 'system', content: systemInstruction },
+ const makeRequest = async (includeJsonFormat: boolean) => {
+ const bodyObj: any = {
+ model: model,
+ messages: [
+ { role: 'system', content: finalSystemInstruction },
               { role: 'user', content: prompt }
             ],
             temperature: 0.3
@@ -817,7 +858,7 @@ CRITICAL RULES:
           model: "gemini-3.5-flash",
           contents: prompt,
           config: {
-            systemInstruction: systemInstruction,
+            systemInstruction: finalSystemInstruction,
             temperature: 0.3,
             responseMimeType: "application/json",
             responseSchema: {
@@ -1508,11 +1549,12 @@ async function translatePdf(
 const WORKFLOW_SCRIPT = realScriptPath('scripts/pdf_translate_workflow.py');
 
 async function translatePdfViaWorkflow(
-  fileBuffer: Buffer,
-  progress: (msg: string) => void,
-  customApi: CustomApiConfig,
-  sourceLang: string | undefined,
-  targetLang: string
+ fileBuffer: Buffer,
+ progress: (msg: string) => void,
+ customApi: CustomApiConfig,
+ sourceLang: string | undefined,
+ targetLang: string,
+ glossaryTerms?: { source: string; target: string }[]
 ): Promise<{ docxBuffer: Buffer; pdfBuffer: Buffer; textContent: string }> {
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'joebook-workflow-'));
   const inputPath = path.join(tempDir, 'input.pdf');
@@ -1528,12 +1570,22 @@ async function translatePdfViaWorkflow(
       '--output', outputPath,
       '--base-url', String(customApi?.baseUrl || 'http://127.0.0.1:1234/v1').trim(),
       '--model', String(customApi?.model || 'gemma-4-e4b-it-mlx').trim(),
-      '--api-key', customApi?.apiKey || 'not-required',
-      '--lang-in', normalizePdf2zhLang(sourceLang),
-      '--lang-out', normalizePdf2zhLang(targetLang),
-      '--timeout', '120',
-      '--batch-size', '10',
-    ];
+ '--api-key', customApi?.apiKey || 'not-required',
+ '--lang-in', normalizePdf2zhLang(sourceLang),
+ '--lang-out', normalizePdf2zhLang(targetLang),
+ '--timeout', '120',
+ '--batch-size', '10',
+ ];
+
+ // Write glossary terms to temp JSON file for Python workflow
+ let glossaryJsonPath: string | null = null;
+ if (glossaryTerms && glossaryTerms.length > 0) {
+ try {
+ glossaryJsonPath = path.join(tempDir, 'glossary.json');
+ await fs.promises.writeFile(glossaryJsonPath, JSON.stringify(glossaryTerms, null, 2));
+ args.push('--glossary-json', glossaryJsonPath);
+ } catch (e) { console.warn('[workflow] Failed to write glossary JSON:', e); }
+ }
 
     console.log('[workflow] args:', args.slice(0, -3).join(' '), '...');
     const { stdout, stderr } = await execFileAsync(PDF2ZH_PYTHON, args, {
@@ -1616,9 +1668,16 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
     };
   }
 
-  const sId = sessionId || Math.random().toString(36).substring(2);
-  const originalName = file.originalname;
-  const ext = path.extname(originalName).toLowerCase();
+ const sId = sessionId || Math.random().toString(36).substring(2);
+ const originalName = file.originalname;
+ const ext = path.extname(originalName).toLowerCase();
+
+  const parsedGlossary = parseJsonField<any[]>(req.body.glossaryTerms);
+  const glossaryTerms = Array.isArray(parsedGlossary) && parsedGlossary.length > 0
+    ? parsedGlossary.map((t: any) => ({ source: String(t.source), target: String(t.target) }))
+    : undefined;
+  const agentPlan = parseJsonField<AgentPlanPayload>(req.body.agentPlan);
+  if (agentPlan?.summary) console.log('[agent orchestration]', agentPlan.summary);
 
   // Session state updates for progress bar reporting
   const updateProgress = (pct: number, statusText: string) => {
@@ -1631,8 +1690,8 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
   // Execute in background
   Promise.resolve().then(async () => {
     try {
-      const translateRunner = async (textBatch: string[]): Promise<string[]> => {
-        const translated = await translateTextBatch(textBatch, sourceLang, targetLang, tone, customApi);
+ const translateRunner = async (textBatch: string[]): Promise<string[]> => {
+ const translated = await translateTextBatch(textBatch, sourceLang, targetLang, tone, apiForRole(agentPlan, 'executor', customApi), false, glossaryTerms);
         console.log('[translateRunner] batch in', textBatch);
         console.log('[translateRunner] batch out', translated);
         return translated;
@@ -1670,7 +1729,7 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
           // Python available: run unified workflow (逐 span API 翻译 + 白底黑字精确覆盖 + 术语修正)
           try {
             updateProgress(15, '使用 Python 高保真工作流（逐 span 识别 + 白底黑字精细覆盖 + 专业术语修正）...');
-            pdfOut = await translatePdfViaWorkflow(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi || {}, sourceLang, targetLang);
+            pdfOut = await translatePdfViaWorkflow(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi || {}, sourceLang, targetLang, glossaryTerms);
           } catch (workflowErr: any) {
             console.warn('[workflow fallback]', workflowErr?.message || workflowErr);
             // Fallback to PyMuPDF if custom API is configured
@@ -1955,24 +2014,22 @@ Do NOT output anything other than the polished translation. No markdown codebloc
       });
 
       const response = await ai.models.generateContent({
-        model: modelToUse,
-        contents: prompt,
-        config: {
-          systemInstruction: systemInstruction,
-          temperature: 0.3,
-        }
-      });
+ model: modelToUse,
+ contents: prompt,
+ config: {
+ systemInstruction: systemInstruction,
+ temperature: 0.3,
+ }
+ });
 
-      let resultText = response.text?.trim() || currentTranslation;
-      resultText = resultText.replace(/^```[a-zA-Z]*\n?/i, '').replace(/\n?```$/i, '').trim();
-      if (resultText.startsWith('"') && resultText.endsWith('"')) {
-        resultText = resultText.slice(1, -1).trim();
-      }
-      return resultText;
-    }, customApi);
-  }
-
-  else if (customApi && customApi.apiKey && customApi.baseUrl) {
+ let resultText = response.text?.trim() || currentTranslation;
+ resultText = resultText.replace(/^```[a-zA-Z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+ if (resultText.startsWith('"') && resultText.endsWith('"')) {
+ resultText = resultText.slice(1, -1).trim();
+ }
+ return resultText;
+ }, customApi);
+ } else if (customApi && customApi.apiKey && customApi.baseUrl) {
     const baseUrl = customApi.baseUrl.endsWith('/') ? customApi.baseUrl.slice(0, -1) : customApi.baseUrl;
     const model = customApi.model || 'gpt-3.5-turbo';
     
@@ -2027,12 +2084,12 @@ Do NOT output anything other than the polished translation. No markdown codebloc
       });
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-        config: {
-          systemInstruction: systemInstruction,
-          temperature: 0.3,
-        }
+ model: "gemini-3.5-flash",
+ contents: prompt,
+ config: {
+ systemInstruction: systemInstruction,
+ temperature: 0.3,
+ }
       });
 
       let resultText = response.text?.trim() || currentTranslation;
@@ -2048,29 +2105,42 @@ Do NOT output anything other than the polished translation. No markdown codebloc
 // Interactive: Translate arbitrary string list with API variables
 app.post('/api/translate-chunks', async (req, res): Promise<any> => {
   const { texts, sourceLang, targetLang, tone, polishOnly, currentTranslation } = req.body;
+  const agentPlan = parseJsonField<AgentPlanPayload>(req.body.agentPlan);
+  if (agentPlan?.summary) console.log('[agent orchestration chunks]', agentPlan.summary);
   if (!texts || !Array.isArray(texts)) {
     return res.status(400).json({ error: '文本列表格式不正确' });
   }
 
-  // Parse custom API config
-  let customApi: { apiKey?: string; baseUrl?: string; model?: string } | undefined;
-  if (req.body.customApiKey && req.body.customBaseUrl) {
-    customApi = {
-      apiKey: req.body.customApiKey,
-      baseUrl: req.body.customBaseUrl,
-      model: req.body.customModel
-    };
-  }
+ // Parse custom API config
+ let customApi: { apiKey?: string; baseUrl?: string; model?: string } | undefined;
+ if (req.body.customApiKey && req.body.customBaseUrl) {
+ customApi = {
+ apiKey: req.body.customApiKey,
+ baseUrl: req.body.customBaseUrl,
+ model: req.body.customModel
+ };
+ }
 
-  try {
-    if (polishOnly) {
-      const originalText = texts[0] || '';
-      const polished = await polishTextSingle(originalText, currentTranslation || '', targetLang, tone, customApi);
-      return res.json({ success: true, translations: [polished] });
-    } else {
-      const translations = await translateTextBatch(texts, sourceLang, targetLang, tone, customApi);
-      return res.json({ success: true, translations });
-    }
+ // Parse glossary terms
+ let glossaryTerms: { source: string; target: string }[] | undefined;
+ if (req.body.glossaryTerms) {
+ try {
+ const parsed = typeof req.body.glossaryTerms === 'string' ? JSON.parse(req.body.glossaryTerms) : req.body.glossaryTerms;
+ if (Array.isArray(parsed) && parsed.length > 0) {
+ glossaryTerms = parsed.map((t: any) => ({ source: String(t.source), target: String(t.target) }));
+ }
+ } catch (e) { console.warn('[translate-chunks] Failed to parse glossaryTerms:', e); }
+ }
+
+ try {
+ if (polishOnly) {
+ const originalText = texts[0] || '';
+ const polished = await polishTextSingle(originalText, currentTranslation || '', targetLang, tone, apiForRole(agentPlan, 'proofreader', customApi));
+ return res.json({ success: true, translations: [polished] });
+ } else {
+ const translations = await translateTextBatch(texts, sourceLang, targetLang, tone, apiForRole(agentPlan, 'executor', customApi), false, glossaryTerms);
+ return res.json({ success: true, translations });
+ }
   } catch (err: any) {
     console.error('Error translating or polishing chunks:', err);
     let msg = err.message || '翻译段落组出错';

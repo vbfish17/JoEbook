@@ -579,10 +579,28 @@ def main():
                         help="Spans per API batch")
     parser.add_argument("--skip-glossary", action="store_true",
                         help="Skip the glossary correction step")
+    parser.add_argument("--glossary-json", default=None,
+                        help="Optional JSON file with custom terminology mappings")
     parser.add_argument("--timeout", type=int, default=60,
                         help="API call timeout in seconds")
 
     args = parser.parse_args()
+
+    if args.glossary_json:
+        try:
+            with open(args.glossary_json, 'r', encoding='utf-8') as f:
+                custom_terms = json.load(f)
+            if isinstance(custom_terms, list):
+                for item in custom_terms:
+                    if isinstance(item, dict) and item.get('source') and item.get('target'):
+                        GLOSSARY[str(item['source'])] = str(item['target'])
+            elif isinstance(custom_terms, dict):
+                for source, target in custom_terms.items():
+                    if source and target:
+                        GLOSSARY[str(source)] = str(target)
+            print(f"Loaded custom glossary terms: {len(custom_terms) if hasattr(custom_terms, '__len__') else 0}", flush=True)
+        except Exception as exc:
+            print(f"[WARN] failed to load custom glossary JSON: {exc}", flush=True)
 
     # Validate input
     src = Path(args.input)

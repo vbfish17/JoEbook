@@ -1,6 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { get, set } from 'idb-keyval';
 import { motion, AnimatePresence } from 'motion/react';
+import {
+  addTerm,
+  loadTermbase,
+  extractTermCandidates,
+  parseTermComparisonText,
+  type TermEntry,
+} from './termbase';
+import { buildRoleApiMap, planAgentAllocation, type RoleApiMap } from './agentOrchestrator';
 import { 
   UploadCloud, 
   Languages, 
@@ -40,6 +48,8 @@ interface CustomApiConfig {
   baseUrl: string;
   model: string;
 }
+
+type AgentRole = 'planner' | 'executor' | 'proofreader';
 
 interface TranslationHistoryItem {
   id: string;
@@ -477,6 +487,14 @@ export default function App() {
   const [showRepackConfirm, setShowRepackConfirm] = useState<boolean>(false);
   const [showClearConfirm, setShowClearConfirm] = useState<boolean>(false);
 
+  const [termbaseEntries, setTermbaseEntries] = useState<TermEntry[]>([]);
+  const [termComparisonText, setTermComparisonText] = useState<string>('');
+  const [termbaseNotice, setTermbaseNotice] = useState<string>('');
+  const [agentOrchestrationEnabled, setAgentOrchestrationEnabled] = useState<boolean>(() => localStorage.getItem('joebook_agent_orchestration') === 'true');
+  const [agentMaxExecutors, setAgentMaxExecutors] = useState<number>(() => Number(localStorage.getItem('joebook_agent_max_executors') || '4'));
+  const [agentRoleApi, setAgentRoleApi] = useState<Partial<RoleApiMap>>({});
+  const [agentStatus, setAgentStatus] = useState<string>('');
+
   // JoEbook editor utilities: find and replace across the bilingual workspace
   const [findQuery, setFindQuery] = useState<string>('');
   const [replaceQuery, setReplaceQuery] = useState<string>('');
@@ -534,6 +552,17 @@ export default function App() {
       return next;
     });
   };
+
+  useEffect(() => {
+    loadTermbase().then(setTermbaseEntries).catch(() => setTermbaseEntries([]));
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('joebook_agent_orchestration', String(agentOrchestrationEnabled));
+      localStorage.setItem('joebook_agent_max_executors', String(agentMaxExecutors));
+    } catch (_) {}
+  }, [agentOrchestrationEnabled, agentMaxExecutors]);
 
   // Auto-save Settings to localStorage when values change
   useEffect(() => {
@@ -670,6 +699,48 @@ const syncSourceDir = (fileList: File[]) => {
   };
 
   // Pull / Fetch available models from custom API endpoint dynamically
+  const getActiveGlossaryTerms = async () => {
+    const terms = await loadTermbase();
+    const active = terms
+      .filter(t => (!t.sourceLang || t.sourceLang === sourceLang || sourceLang === 'Auto') && (!t.targetLang || t.targetLang === targetLang))
+      .sort((a, b) => (b.confirmed === a.confirmed ? b.frequency - a.frequency : b.confirmed ? 1 : -1))
+      .slice(0, 120)
+      .map(t => ({ source: t.source, target: t.target }));
+    setTermbaseEntries(terms);
+    return active;
+  };
+
+  const handleImportTermComparison = async () => {
+    const parsed = parseTermComparisonText(termComparisonText, { sourceLang, targetLang, domain: 'custom', confirmed: true });
+    for (const entry of parsed) await addTerm(entry);
+    const latest = await loadTermbase();
+    setTermbaseEntries(latest);
+    setTermbaseNotice(currentLang === 'zh' ? `已导入 ${parsed.length} 条自定义术语。` : `Imported ${parsed.length} custom terms.`);
+    setTermComparisonText('');
+  };
+
+  const learnTermsFromEdit = async (idx: number, oldTranslation: string, newTranslation: string) => {
+    const candidates = extractTermCandidates(originalParagraphs[idx] || '', oldTranslation || '', newTranslation || '')
+      .filter(c => c.confidence >= 0.5 && c.source && c.target)
+      .slice(0, 3);
+    for (const c of candidates) {
+      await addTerm({ source: c.source, target: c.target, sourceLang, targetLang, domain: 'proofread', confirmed: false });
+    }
+    if (candidates.length > 0) {
+      const latest = await loadTermbase();
+      setTermbaseEntries(latest);
+      setTermbaseNotice(currentLang === 'zh' ? `已从本次校对学习 ${candidates.length} 条术语候选。` : `Learned ${candidates.length} term candidates from proofreading.`);
+    }
+  };
+
+  const currentAgentPlan = planAgentAllocation({
+    totalItems: files.length > 1 ? files.length : Math.max(originalParagraphs.length, files.length || 1),
+    batchSize: isInteractiveMode ? 20 : 2,
+    maxExecutors: agentMaxExecutors,
+    enableProofreader: true,
+    roleApi: buildRoleApiMap(customApi, agentRoleApi),
+  });
+
   const fetchAvailableModels = async () => {
     if (!customApi.baseUrl) {
       setModelsFetchError(currentLang === 'zh' ? '请先填写 API 接口地址 (Base URL)' : 'Please enter API Base URL first');
@@ -1166,6 +1237,11 @@ const syncSourceDir = (fileList: File[]) => {
         payload.customBaseUrl = customApi.baseUrl;
         payload.customModel = customApi.model;
       }
+      payload.glossaryTerms = await getActiveGlossaryTerms();
+      if (agentOrchestrationEnabled) {
+        payload.agentPlan = currentAgentPlan;
+        setAgentStatus(currentAgentPlan.summary);
+      }
 
       const response = await fetch('/api/translate-chunks', {
         method: 'POST',
@@ -1268,6 +1344,11 @@ const syncSourceDir = (fileList: File[]) => {
           payload.customApiKey = customApi.apiKey;
           payload.customBaseUrl = customApi.baseUrl;
           payload.customModel = customApi.model;
+        }
+        payload.glossaryTerms = await getActiveGlossaryTerms();
+        if (agentOrchestrationEnabled) {
+          payload.agentPlan = currentAgentPlan;
+          setAgentStatus(currentAgentPlan.summary);
         }
 
         const response = await fetch('/api/translate-chunks', {
@@ -1648,6 +1729,19 @@ const syncSourceDir = (fileList: File[]) => {
         formData.append('customApiKey', customApi.apiKey);
         formData.append('customBaseUrl', customApi.baseUrl);
         formData.append('customModel', customApi.model);
+      }
+      const glossaryTerms = await getActiveGlossaryTerms();
+      formData.append('glossaryTerms', JSON.stringify(glossaryTerms));
+      if (agentOrchestrationEnabled) {
+        const plan = planAgentAllocation({
+          totalItems: allFiles.length,
+          batchSize: 2,
+          maxExecutors: agentMaxExecutors,
+          enableProofreader: true,
+          roleApi: buildRoleApiMap(customApi, agentRoleApi),
+        });
+        formData.append('agentPlan', JSON.stringify(plan));
+        setAgentStatus(plan.summary);
       }
 
       try {
@@ -2535,6 +2629,7 @@ const syncSourceDir = (fileList: File[]) => {
                                       placeholder={status === 'pending' || status === 'translating' ? (currentLang === 'zh' ? '等待 AI 对齐翻译渲染...' : 'Awaiting alignment completion...') : (currentLang === 'zh' ? '点击在此手动校对或美化翻译段落...' : 'Enter translation correction...')}
                                       onChange={(e) => {
                                         const val = e.target.value;
+                                        const oldVal = translatedParagraphsRef.current[item.idx] || '';
                                         setTranslatedParagraphs(prev => {
                                           const next = [...prev];
                                           next[item.idx] = val;
@@ -2545,6 +2640,7 @@ const syncSourceDir = (fileList: File[]) => {
                                           next[item.idx] = 'edited';
                                           return next;
                                         });
+                                        window.setTimeout(() => learnTermsFromEdit(item.idx, oldVal, val).catch(() => {}), 0);
                                       }}
                                       rows={Math.max(2, Math.ceil(item.original.length / 50))}
                                       className="w-full bg-zinc-900 border border-zinc-800 hover:border-zinc-755 focus:border-indigo-500 rounded-lg p-2.5 text-xs text-white font-sans focus:outline-none transition-all leading-relaxed resize-y disabled:opacity-40"
@@ -3075,6 +3171,58 @@ const syncSourceDir = (fileList: File[]) => {
             </motion.div>
           )}
         </AnimatePresence>
+
+        <div className="col-span-12 bg-zinc-900 border border-zinc-800 rounded-2xl p-5 grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div>
+            <h3 className="text-xs font-bold text-zinc-300 uppercase tracking-widest mb-2 flex items-center gap-2">
+              <BookOpen className="w-4 h-4 text-emerald-400" />
+              {currentLang === 'zh' ? '翻译术语记忆' : 'Terminology Memory'}
+            </h3>
+            <textarea
+              value={termComparisonText}
+              onChange={(e) => setTermComparisonText(e.target.value)}
+              placeholder={currentLang === 'zh' ? '每行一条：Model Context Protocol => 模型上下文协议' : 'One per line: source => target'}
+              rows={4}
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-3 text-xs text-zinc-200 font-mono focus:outline-none focus:border-emerald-500"
+            />
+            <div className="mt-2 flex items-center justify-between gap-3">
+              <span className="text-[10px] text-zinc-500">{currentLang === 'zh' ? `当前记忆 ${termbaseEntries.length} 条；校对修改会自动学习候选术语。` : `${termbaseEntries.length} terms in memory; proofreading edits are learned automatically.`}</span>
+              <button type="button" onClick={handleImportTermComparison} className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold">
+                {currentLang === 'zh' ? '导入术语' : 'Import Terms'}
+              </button>
+            </div>
+            {termbaseNotice && <p className="mt-2 text-[10px] text-emerald-400">{termbaseNotice}</p>}
+          </div>
+
+          <div>
+            <h3 className="text-xs font-bold text-zinc-300 uppercase tracking-widest mb-2 flex items-center gap-2">
+              <CpuIcon className="w-4 h-4 text-indigo-400" />
+              {currentLang === 'zh' ? '规划-执行-校对 智能体编排' : 'Planner-Executor-Proofreader Orchestration'}
+            </h3>
+            <div className="bg-zinc-950/50 border border-zinc-800 rounded-xl p-3 space-y-3">
+              <label className="flex items-center justify-between text-xs text-zinc-300">
+                <span>{currentLang === 'zh' ? '启用智能体编排' : 'Enable orchestration'}</span>
+                <input type="checkbox" checked={agentOrchestrationEnabled} onChange={(e) => setAgentOrchestrationEnabled(e.target.checked)} />
+              </label>
+              <label className="block text-[10px] text-zinc-500 uppercase font-bold">
+                {currentLang === 'zh' ? '最多执行智能体数量' : 'Max executor agents'}
+                <input type="number" min={1} max={12} value={agentMaxExecutors} onChange={(e) => setAgentMaxExecutors(Number(e.target.value) || 1)} className="mt-1 w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-xs text-white" />
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                {(['planner','executor','proofreader'] as AgentRole[]).map(role => (
+                  <input
+                    key={role}
+                    value={(agentRoleApi[role]?.model || '')}
+                    onChange={(e) => setAgentRoleApi(prev => ({ ...prev, [role]: { ...(prev[role] || {}), model: e.target.value } }))}
+                    placeholder={`${role} model`}
+                    className="bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-[10px] text-white font-mono"
+                  />
+                ))}
+              </div>
+              <p className="text-[10px] text-indigo-300">{agentStatus || currentAgentPlan.summary}</p>
+            </div>
+          </div>
+        </div>
 
         {/* BENTO CARD 3: Destination Languages & Style Selector */}
         <div className="col-span-12 lg:col-span-4 bg-zinc-900 border border-zinc-800 rounded-2xl p-6 flex flex-col justify-between">
