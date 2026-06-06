@@ -21,6 +21,10 @@ Human-in-the-loop\t人在回路中
   assert.equal(parsed[0].sourceLang, 'English');
   assert.equal(parsed[0].domain, 'ai');
 
+  const autoLangParsed = parseTermComparisonText('Model Context Protocol => 模型上下文协议', { sourceLang: 'Auto', targetLang: 'Auto', domain: 'ai' });
+  assert.equal(autoLangParsed[0].sourceLang, 'en');
+  assert.equal(autoLangParsed[0].targetLang, 'zh-CN');
+
   const candidates = extractTermCandidates('The Model Context Protocol is important.', '模型上下文协议很重要。', 'MCP 协议很重要。');
   assert.ok(candidates.length >= 1, 'manual proofreading diff should produce a learning candidate');
   assert.equal(candidates[0].target, 'MCP 协议');

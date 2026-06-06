@@ -84,8 +84,21 @@ const PDF2ZH_SCRIPT = realScriptPath('scripts/pdf_translate_via_pdf2zh.py');
 
 type CustomApiConfig = { apiKey?: string; baseUrl?: string; model?: string };
 type AgentRole = 'planner' | 'executor' | 'proofreader';
+type AgentBatchPlan = {
+  id?: string;
+  role?: AgentRole;
+  workerIndex?: number;
+  startIndex?: number;
+  endIndex?: number;
+  itemCount?: number;
+};
 type AgentPlanPayload = {
+  enabled?: boolean;
+  totalItems?: number;
+  batchSize?: number;
+  executorBatches?: AgentBatchPlan[];
   roles?: Record<AgentRole, { count?: number; api?: CustomApiConfig }>;
+  modelProfiles?: Record<AgentRole, CustomApiConfig | null>;
   summary?: string;
 };
 
@@ -99,13 +112,64 @@ function parseJsonField<T>(value: any): T | undefined {
 }
 
 function apiForRole(plan: AgentPlanPayload | undefined, role: AgentRole, fallback?: CustomApiConfig): CustomApiConfig | undefined {
+  // Priority 1: modelProfiles (sent from frontend with full API config per role)
+  const mp = plan?.modelProfiles?.[role];
+  if (mp && (mp.baseUrl || mp.apiKey || mp.model)) {
+    return {
+      apiKey: mp.apiKey || fallback?.apiKey,
+      baseUrl: mp.baseUrl || fallback?.baseUrl,
+      model: mp.model || fallback?.model,
+    };
+  }
+  // Priority 2: roles[].api (from planAgentAllocation)
   const roleApi = plan?.roles?.[role]?.api;
-  if (!roleApi) return fallback;
-  return {
-    apiKey: roleApi.apiKey || fallback?.apiKey,
-    baseUrl: roleApi.baseUrl || fallback?.baseUrl,
-    model: roleApi.model || fallback?.model,
-  };
+  if (roleApi && (roleApi.baseUrl || roleApi.apiKey || roleApi.model)) {
+    return {
+      apiKey: roleApi.apiKey || fallback?.apiKey,
+      baseUrl: roleApi.baseUrl || fallback?.baseUrl,
+      model: roleApi.model || fallback?.model,
+    };
+  }
+  // Priority 3: fallback (current custom API)
+  return fallback;
+}
+
+function isAgentPlanEnabled(plan: AgentPlanPayload | undefined): boolean {
+  return !!(plan?.enabled && Array.isArray(plan.executorBatches) && plan.executorBatches.length > 0);
+}
+
+function estimateExecutorCount(plan: AgentPlanPayload | undefined): number {
+  if (!isAgentPlanEnabled(plan)) return 0;
+  const fromBatches = plan?.executorBatches?.length || 0;
+  const fromRole = plan?.roles?.executor?.count || 0;
+  return Math.max(1, Math.min(12, Math.floor(Math.max(fromBatches, fromRole))));
+}
+
+function estimateAgentBatchSize(plan: AgentPlanPayload | undefined, fallback: number): number {
+  if (!isAgentPlanEnabled(plan)) return fallback;
+  const declared = Math.floor(Number(plan?.batchSize) || 0);
+  if (declared > 0) return Math.max(1, Math.min(80, declared));
+  const total = Math.floor(Number(plan?.totalItems) || 0);
+  const executors = estimateExecutorCount(plan);
+  if (total > 0 && executors > 0) return Math.max(1, Math.ceil(total / executors));
+  return fallback;
+}
+
+
+function applyTerminologyMemory(text: string, glossaryTerms?: { source: string; target: string }[]): string {
+  if (!glossaryTerms || glossaryTerms.length === 0) return text;
+  let output = String(text || '');
+  const sorted = [...glossaryTerms]
+    .filter(t => t?.source && t?.target)
+    .sort((a, b) => b.source.length - a.source.length);
+  for (const term of sorted) {
+    output = output.split(term.source).join(term.target);
+  }
+  return output;
+}
+
+function applyTerminologyMemoryBatch(texts: string[], glossaryTerms?: { source: string; target: string }[]): string[] {
+  return texts.map(text => applyTerminologyMemory(text, glossaryTerms));
 }
 
 function normalizePdf2zhLang(value: string | undefined): string {
@@ -465,7 +529,7 @@ function drawWrappedBlock(
 
 const app = express();
 const DEFAULT_PORT = 7050;
-const PORT = Number(process.env.JOEBOOK_PORT || (process.env.NODE_ENV === 'production' ? process.env.PORT : DEFAULT_PORT) || DEFAULT_PORT);
+const PORT = Number(process.env.JOEBOOK_PORT || DEFAULT_PORT);
 // JoEbook server entry for local development and packaged desktop runtime.
 
 // Enable JSON and URL-encoded body parsing
@@ -741,7 +805,7 @@ CRITICAL RULES:
             const parsed = parseTranslateGemmaBatch(content);
             const finalText = (parsed[0] || content).trim();
             console.log('[TranslateGemma] final text', finalText);
-            translatedResults.push(finalText);
+            translatedResults.push(applyTerminologyMemory(finalText, glossaryTerms));
           }
           console.log('[TranslateGemma] translatedResults', translatedResults);
           return translatedResults;
@@ -824,17 +888,17 @@ CRITICAL RULES:
 
         const data = parseFlexibleJson(content);
         if (Array.isArray(data)) {
-          return data;
+          return applyTerminologyMemoryBatch(data.map(v => String(v)), glossaryTerms);
         }
         if (data && typeof data === 'object') {
-          if (Array.isArray(data.translations)) return data.translations;
-          if (Array.isArray(data.translated)) return data.translated;
-          if (Array.isArray(data.paragraphs)) return data.paragraphs;
-          if (Array.isArray(data.results)) return data.results;
-          const foundArray = Object.values(data).find(v => Array.isArray(v));
-          if (foundArray) return foundArray;
+          if (Array.isArray(data.translations)) return applyTerminologyMemoryBatch(data.translations.map((v: any) => String(v)), glossaryTerms);
+          if (Array.isArray(data.translated)) return applyTerminologyMemoryBatch(data.translated.map((v: any) => String(v)), glossaryTerms);
+          if (Array.isArray(data.paragraphs)) return applyTerminologyMemoryBatch(data.paragraphs.map((v: any) => String(v)), glossaryTerms);
+          if (Array.isArray(data.results)) return applyTerminologyMemoryBatch(data.results.map((v: any) => String(v)), glossaryTerms);
+          const foundArray = Object.values(data).find(v => Array.isArray(v)) as any[] | undefined;
+          if (foundArray) return applyTerminologyMemoryBatch(foundArray.map((v: any) => String(v)), glossaryTerms);
         }
-        return [];
+        return applyTerminologyMemoryBatch(texts, glossaryTerms);
       }, customApi);
     } else {
       // Default Gemini API configuration using @google/genai SDK
@@ -879,16 +943,16 @@ CRITICAL RULES:
         if (!response.text) return texts;
         const cleanJson = response.text.trim();
         const data = JSON.parse(cleanJson);
-        if (Array.isArray(data)) return data;
+        if (Array.isArray(data)) return applyTerminologyMemoryBatch(data.map((v: any) => String(v)), glossaryTerms);
         if (data && typeof data === 'object') {
-          if (Array.isArray(data.translations)) return data.translations;
-          if (Array.isArray(data.translated)) return data.translated;
-          if (Array.isArray(data.paragraphs)) return data.paragraphs;
-          if (Array.isArray(data.results)) return data.results;
-          const foundArray = Object.values(data).find(v => Array.isArray(v));
-          if (foundArray) return foundArray;
+          if (Array.isArray(data.translations)) return applyTerminologyMemoryBatch(data.translations.map((v: any) => String(v)), glossaryTerms);
+          if (Array.isArray(data.translated)) return applyTerminologyMemoryBatch(data.translated.map((v: any) => String(v)), glossaryTerms);
+          if (Array.isArray(data.paragraphs)) return applyTerminologyMemoryBatch(data.paragraphs.map((v: any) => String(v)), glossaryTerms);
+          if (Array.isArray(data.results)) return applyTerminologyMemoryBatch(data.results.map((v: any) => String(v)), glossaryTerms);
+          const foundArray = Object.values(data).find(v => Array.isArray(v)) as any[] | undefined;
+          if (foundArray) return applyTerminologyMemoryBatch(foundArray.map((v: any) => String(v)), glossaryTerms);
         }
-        return [];
+        return applyTerminologyMemoryBatch(texts, glossaryTerms);
       }, customApi);
     }
   } catch (err: any) {
@@ -911,8 +975,8 @@ CRITICAL RULES:
     if (texts.length > 1) {
       console.warn(`[分治恢复-异常捕获] 批次翻译过程抛出错误: ${errMsg}. 自动切分为两部分继续翻译...`);
     } else {
-      console.warn(`[分治恢复-异常捕获单体] 翻译单句出错，为了不阻断整档翻译流程，对该段放行并保留原文: ${errMsg}`);
-      return texts;
+      console.warn(`[分治恢复-异常捕获单体] 翻译单句出错，为了不阻断整档翻译流程，对该段应用术语记忆后放行: ${errMsg}`);
+      return applyTerminologyMemoryBatch(texts, glossaryTerms);
     }
   }
 
@@ -943,12 +1007,14 @@ async function batchTranslateWithConcurrency(
   translateFn: (texts: string[]) => Promise<string[]>,
   progress: (msg: string) => void,
   customApi?: { apiKey?: string; baseUrl?: string; model?: string },
-  contextName: string = "文档"
+  contextName: string = "文档",
+  agentPlan?: AgentPlanPayload
 ): Promise<string[]> {
-  const isCustom = !!(customApi && customApi.apiKey);
-  const batchSize = isCustom ? 40 : 8;
+  const isCustom = !!(customApi && customApi.baseUrl);
+  const fallbackBatchSize = isCustom ? 40 : 8;
+  const batchSize = estimateAgentBatchSize(agentPlan, fallbackBatchSize);
   const batchDelay = isCustom ? 50 : 1200;
-  const concurrency = isCustom ? 4 : 1;
+  const concurrency = isAgentPlanEnabled(agentPlan) ? estimateExecutorCount(agentPlan) : (isCustom ? 4 : 1);
   const translations: string[] = new Array(pList.length);
 
   // Group into batches
@@ -1001,7 +1067,8 @@ export async function translateDocx(
   fileBuffer: Buffer,
   translateFn: (texts: string[]) => Promise<string[]>,
   progress: (msg: string) => void,
-  customApi?: { apiKey?: string; baseUrl?: string; model?: string }
+  customApi?: { apiKey?: string; baseUrl?: string; model?: string },
+  agentPlan?: AgentPlanPayload
 ): Promise<Buffer> {
   const zip = await JSZip.loadAsync(fileBuffer);
   
@@ -1067,7 +1134,7 @@ export async function translateDocx(
   progress(`过滤后共有 ${pList.length} 个待翻译的有效文本块...`);
   
   // Process with concurrency pool
-  const translations = await batchTranslateWithConcurrency(pList, translateFn, progress, customApi, "DOCX");
+  const translations = await batchTranslateWithConcurrency(pList, translateFn, progress, customApi, "DOCX", agentPlan);
   
   // Reconstruct XML files in Zip
   for (let fileIdx = 0; fileIdx < fileParagraphs.length; fileIdx++) {
@@ -1123,7 +1190,8 @@ async function translatePptx(
   fileBuffer: Buffer,
   translateFn: (texts: string[]) => Promise<string[]>,
   progress: (msg: string) => void,
-  customApi?: { apiKey?: string; baseUrl?: string; model?: string }
+  customApi?: { apiKey?: string; baseUrl?: string; model?: string },
+  agentPlan?: AgentPlanPayload
 ): Promise<Buffer> {
   console.log(`[translatePptx] Input file buffer length: ${fileBuffer.length} bytes (${(fileBuffer.length / 1024 / 1024).toFixed(2)} MB)`);
   const zip = await JSZip.loadAsync(fileBuffer);
@@ -1190,7 +1258,7 @@ async function translatePptx(
   progress(`过滤后存在 ${pList.length} 个非空幻灯片文本项进行翻译...`);
   
   // Process with concurrency pool
-  const translations = await batchTranslateWithConcurrency(pList, translateFn, progress, customApi, "PPTX");
+  const translations = await batchTranslateWithConcurrency(pList, translateFn, progress, customApi, "PPTX", agentPlan);
   
   for (let fileIdx = 0; fileIdx < fileParagraphs.length; fileIdx++) {
     const item = fileParagraphs[fileIdx];
@@ -1244,7 +1312,8 @@ async function translateEpub(
   fileBuffer: Buffer,
   translateFn: (texts: string[]) => Promise<string[]>,
   progress: (msg: string) => void,
-  customApi?: { apiKey?: string; baseUrl?: string; model?: string }
+  customApi?: { apiKey?: string; baseUrl?: string; model?: string },
+  agentPlan?: AgentPlanPayload
 ): Promise<Buffer> {
   const zip = await JSZip.loadAsync(fileBuffer);
   
@@ -1307,7 +1376,7 @@ async function translateEpub(
   });
   
   // Process with concurrency pool
-  const translations = await batchTranslateWithConcurrency(translateList, translateFn, progress, customApi, "EPUB");
+  const translations = await batchTranslateWithConcurrency(translateList, translateFn, progress, customApi, "EPUB", agentPlan);
   
   for (let fileIdx = 0; fileIdx < fileElements.length; fileIdx++) {
     const item = fileElements[fileIdx];
@@ -1350,7 +1419,8 @@ async function translateMarkdown(
   fileBuffer: Buffer,
   translateFn: (texts: string[]) => Promise<string[]>,
   progress: (msg: string) => void,
-  customApi?: { apiKey?: string; baseUrl?: string; model?: string }
+  customApi?: { apiKey?: string; baseUrl?: string; model?: string },
+  agentPlan?: AgentPlanPayload
 ): Promise<Buffer> {
   const mdContent = fileBuffer.toString('utf8');
   const blocks = mdContent.split(/\r?\n\r?\n/);
@@ -1372,7 +1442,7 @@ async function translateMarkdown(
   });
   
   // Process with concurrency pool
-  const translations = await batchTranslateWithConcurrency(translateList, translateFn, progress, customApi, "MD语段");
+  const translations = await batchTranslateWithConcurrency(translateList, translateFn, progress, customApi, "MD语段", agentPlan);
   
   translateList.forEach((item) => {
     processedBlocks[item.originIdx] = translations[item.originIdx];
@@ -1446,7 +1516,8 @@ async function translatePdf(
   translateFn: (texts: string[]) => Promise<string[]>,
   progress: (msg: string) => void,
   customApi?: { apiKey?: string; baseUrl?: string; model?: string },
-  targetLang: string = "zh"
+  targetLang: string = "zh",
+  agentPlan?: AgentPlanPayload
 ): Promise<{ docxBuffer: Buffer; pdfBuffer: Buffer; textContent: string }> {
   progress(`正在读取并解析 PDF 文本排版数据...`);
   const data = await pdfParse(fileBuffer);
@@ -1467,7 +1538,7 @@ async function translatePdf(
 
   progress(`过滤提取出共有 ${pList.length} 个待排版翻译的有效文本块...`);
   const pListWithIdx = pList.map((item, idx) => ({ originIdx: idx, text: item.text }));
-  const translations = await batchTranslateWithConcurrency(pListWithIdx, translateFn, progress, customApi, "PDF段落");
+  const translations = await batchTranslateWithConcurrency(pListWithIdx, translateFn, progress, customApi, "PDF段落", agentPlan);
   console.log('[translatePdf] pList sample', pList.slice(0, 5));
   console.log('[translatePdf] translations sample', translations.slice(0, 5));
 
@@ -1704,19 +1775,19 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
 
       if (ext === '.docx') {
         mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-        outputBuffer = await translateDocx(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi);
+        outputBuffer = await translateDocx(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, agentPlan);
         outputName = originalName.replace(/\.docx$/i, `_${targetLang}.docx`);
       } else if (ext === '.pptx') {
         mimeType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
-        outputBuffer = await translatePptx(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi);
+        outputBuffer = await translatePptx(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, agentPlan);
         outputName = originalName.replace(/\.pptx$/i, `_${targetLang}.pptx`);
       } else if (ext === '.epub') {
         mimeType = 'application/epub+zip';
-        outputBuffer = await translateEpub(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi);
+        outputBuffer = await translateEpub(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, agentPlan);
         outputName = originalName.replace(/\.epub$/i, `_${targetLang}.epub`);
       } else if (ext === '.md') {
         mimeType = 'text/markdown';
-        outputBuffer = await translateMarkdown(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi);
+        outputBuffer = await translateMarkdown(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, agentPlan);
         outputName = originalName.replace(/\.md$/i, `_${targetLang}.md`);
       } else if (ext === '.pdf') {
         let pdfOut;
@@ -1724,7 +1795,7 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
         const canRunPythonScripts = hasPython && scriptExists('scripts/pdf_translate_workflow.py') && scriptExists('scripts/pdf_translate_via_pymupdf.py') && scriptExists('scripts/pdf_translate_via_pdf2zh.py');
         if (!canRunPythonScripts) {
           updateProgress(15, '使用内置 PDF 翻译引擎（纯 Node.js 无外部依赖）...');
-          pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
+          pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang, agentPlan);
         } else {
           // Python available: run unified workflow (逐 span API 翻译 + 白底黑字精确覆盖 + 术语修正)
           try {
@@ -1746,11 +1817,11 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
                   } catch (pdf2zhErr: any) {
                     console.warn('[pdf2zh fallback]', pdf2zhErr?.message || pdf2zhErr);
                     updateProgress(55, 'All Python engines failed, falling back to basic text-only PDF rebuilder...');
-                    pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
+                    pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang, agentPlan);
                   }
                 } else {
                   updateProgress(45, 'No pdf2zh API config, falling back to basic text-only PDF rebuilder...');
-                  pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
+                  pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang, agentPlan);
                 }
               }
             } else if (canUsePdf2zh(customApi)) {
@@ -1760,11 +1831,11 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
               } catch (pdf2zhErr: any) {
                 console.warn('[pdf2zh fallback]', pdf2zhErr?.message || pdf2zhErr);
                 updateProgress(45, 'PDFMathTranslate failed, falling back to basic text-only PDF rebuilder...');
-                pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
+                pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang, agentPlan);
               }
             } else {
               updateProgress(35, 'No custom API config available, using basic text-only PDF rebuilder...');
-              pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang);
+              pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang, agentPlan);
             }
           }
         }
@@ -1794,7 +1865,7 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
       if (errorMsg.includes('403') || errorMsg.includes('PERMISSION_DENIED') || errorMsg.includes('denied access')) {
         errorMsg = '【引擎访问限制 / 403 PERMISSION_DENIED】检测到内置公用 Gemini 接口受到开发沙盒网络/权限限制暂不可用。JoEbook 已为您集成本地/第三方大模型免密与配置机制：请点击页面右上角【设置 (齿轮) 按钮】，启用【第三方及自建模型】，切换使用您自己的 API 密钥 (我们为您预设了 Gemini 2.5 Official, DeepSeek, OpenAI, Ollama 快捷填表模板)，即可 100% 成功启动完美排版翻译！\n\n[Platform Info] Standard backend sandbox denied access (403). Please click the Settings icon in the top right, turn on the custom LLM integration toggle, and enter your own API Key using the Gemini 2.5 or DeepSeek/OpenAI autocomplete presets to enjoy high-speed layout-preserving document translation!';
       }
-      activeSessions[sId] = { status: `出错: ${errorMsg}`, progress: -1, error: true };
+      activeSessions[sId] = { status: `出错: ${errorMsg}`, progress: -1, error: true, errorMsg };
     }
   });
 

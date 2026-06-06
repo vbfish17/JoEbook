@@ -17,6 +17,7 @@
  */
 
 import { get, set } from 'idb-keyval';
+import { DEFAULT_TERMS } from './defaultTerms';
 
 // ── Data Model ──────────────────────────────────────
 
@@ -39,6 +40,8 @@ export interface TermbaseStats {
   domains: string[];
   langPairs: string[];
 }
+
+export type NewTermEntry = Omit<TermEntry, 'id' | 'frequency' | 'createdAt' | 'updatedAt'>;
 
 // ── Storage Keys ─────────────────────────────────────
 
@@ -63,39 +66,77 @@ export async function saveTermbase(entries: TermEntry[]): Promise<void> {
   await set(TERMBASE_VERSION_KEY, Date.now());
 }
 
-/** Add a single term entry */
-export async function addTerm(entry: Omit<TermEntry, 'id' | 'frequency' | 'createdAt' | 'updatedAt'>): Promise<TermEntry> {
-  const termbase = await loadTermbase();
-  
-  // Check for duplicate (same source+target+sourceLang+targetLang)
-  const existing = termbase.find(
-    t => t.source === entry.source 
-      && t.target === entry.target 
-      && t.sourceLang === entry.sourceLang 
-      && t.targetLang === entry.targetLang
-      && t.domain === entry.domain
-  );
-  
-  if (existing) {
-    // Increment frequency for existing entry
-    existing.frequency += 1;
-    existing.updatedAt = new Date().toISOString();
-    if (entry.confirmed) existing.confirmed = true;
-    await saveTermbase(termbase);
-    return existing;
-  }
-  
-  const newEntry: TermEntry = {
-    ...entry,
-    id: crypto.randomUUID(),
-    frequency: 1,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+export function createTermEntry(entry: NewTermEntry, existing?: Partial<TermEntry>): TermEntry {
+  const now = new Date().toISOString();
+  return {
+    id: existing?.id || crypto.randomUUID(),
+    source: normalizeTermText(entry.source),
+    target: normalizeTermText(entry.target),
+    sourceLang: entry.sourceLang || 'Auto',
+    targetLang: entry.targetLang || '中文 (简体)',
+    domain: entry.domain || 'general',
+    frequency: existing?.frequency || 1,
+    confirmed: entry.confirmed ?? existing?.confirmed ?? false,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
   };
-  
-  termbase.push(newEntry);
-  await saveTermbase(termbase);
-  return newEntry;
+}
+
+export function mergeTerms(existing: TermEntry[], incoming: NewTermEntry[]): { entries: TermEntry[]; imported: number; updated: number; skipped: number } {
+  const entries = [...existing];
+  let imported = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (const raw of incoming) {
+    const source = normalizeTermText(raw.source);
+    const target = normalizeTermText(raw.target);
+    if (!source || !target || source === target) {
+      skipped++;
+      continue;
+    }
+
+    const idx = entries.findIndex(t =>
+      normalizeTermText(t.source).toLowerCase() === source.toLowerCase()
+      && (t.sourceLang || '') === (raw.sourceLang || 'Auto')
+      && (t.targetLang || '') === (raw.targetLang || '中文 (简体)')
+      && (t.domain || '') === (raw.domain || 'general')
+    );
+
+    if (idx >= 0) {
+      entries[idx] = createTermEntry({ ...raw, source, target }, { ...entries[idx], frequency: (entries[idx].frequency || 0) + 1 });
+      updated++;
+    } else {
+      entries.push(createTermEntry({ ...raw, source, target }));
+      imported++;
+    }
+  }
+
+  return { entries, imported, updated, skipped };
+}
+
+export async function addTerms(entriesToAdd: NewTermEntry[]): Promise<{ imported: number; updated: number; skipped: number; entries: TermEntry[] }> {
+  const current = await loadTermbase();
+  const result = mergeTerms(current, entriesToAdd);
+  await saveTermbase(result.entries);
+  return result;
+}
+
+export async function seedDefaultTermbase(): Promise<{ imported: number; updated: number; skipped: number; entries: TermEntry[] }> {
+  return addTerms(DEFAULT_TERMS.map(t => ({
+    ...t,
+    sourceLang: 'Auto',
+    targetLang: '中文 (简体)',
+    domain: 'default-glossary',
+    confirmed: true,
+  })));
+}
+
+/** Add a single term entry */
+export async function addTerm(entry: NewTermEntry): Promise<TermEntry> {
+  const result = await addTerms([entry]);
+  const source = normalizeTermText(entry.source);
+  return result.entries.find(t => normalizeTermText(t.source).toLowerCase() === source.toLowerCase()) || result.entries[result.entries.length - 1];
 }
 
 /** Update an existing term entry by id */
@@ -150,8 +191,8 @@ export async function getTermsByDomain(domain: string): Promise<TermEntry[]> {
 /** Get termbase statistics */
 export async function getTermbaseStats(): Promise<TermbaseStats> {
   const termbase = await loadTermbase();
-  const domains = [...new Set(termbase.map(t => t.domain).filter(Boolean))];
-  const langPairs = [...new Set(termbase.map(t => `${t.sourceLang}→${t.targetLang}`))];
+  const domains = Array.from(new Set(termbase.map(t => t.domain).filter(Boolean)));
+  const langPairs = Array.from(new Set(termbase.map(t => `${t.sourceLang}→${t.targetLang}`)));
   return {
     total: termbase.length,
     confirmed: termbase.filter(t => t.confirmed).length,
@@ -353,13 +394,31 @@ export interface TermImportDefaults {
   confirmed?: boolean;
 }
 
+const TERM_LANG_PATTERNS: { code: string; regex: RegExp }[] = [
+  { code: 'zh-CN', regex: /[\u4e00-\u9fff]/ },
+  { code: 'ja', regex: /[\u3040-\u309f\u30a0-\u30ff]/ },
+  { code: 'ko', regex: /[\uac00-\ud7af]/ },
+  { code: 'ar', regex: /[\u0600-\u06ff]/ },
+  { code: 'ru', regex: /[\u0400-\u04ff]/ },
+  { code: 'en', regex: /[A-Za-z]/ },
+];
+
 export function normalizeTermText(text: string): string {
   return String(text || '').replace(/\s+/g, ' ').trim();
 }
 
+export function detectTermLanguage(text: string, fallback = 'Auto'): string {
+  const normalized = normalizeTermText(text);
+  if (!normalized) return fallback;
+  for (const pattern of TERM_LANG_PATTERNS) {
+    if (pattern.regex.test(normalized)) return pattern.code;
+  }
+  return fallback;
+}
+
 export function parseTermComparisonText(text: string, defaults: TermImportDefaults = {}): Omit<TermEntry, 'id' | 'frequency' | 'createdAt' | 'updatedAt'>[] {
-  const sourceLang = defaults.sourceLang || 'en';
-  const targetLang = defaults.targetLang || 'zh';
+  const defaultSourceLang = defaults.sourceLang || 'Auto';
+  const defaultTargetLang = defaults.targetLang || 'zh-CN';
   const domain = defaults.domain || 'general';
   const confirmed = defaults.confirmed ?? true;
   const rows: Omit<TermEntry, 'id' | 'frequency' | 'createdAt' | 'updatedAt'>[] = [];
@@ -384,7 +443,14 @@ export function parseTermComparisonText(text: string, defaults: TermImportDefaul
     const target = normalizeTermText(parts.slice(1).join(','));
     if (!source || !target || source === target) continue;
 
-    rows.push({ source, target, sourceLang, targetLang, domain, confirmed });
+    rows.push({
+      source,
+      target,
+      sourceLang: defaultSourceLang === 'Auto' ? detectTermLanguage(source, 'Auto') : defaultSourceLang,
+      targetLang: defaultTargetLang === 'Auto' ? detectTermLanguage(target, 'Auto') : defaultTargetLang,
+      domain,
+      confirmed,
+    });
   }
 
   return rows;
@@ -538,7 +604,7 @@ function findCorrespondingSource(sourceText: string, oldTarget: string, newTarge
     for (let i = 0; i <= sourceWords.length - windowSize; i++) {
       const window = sourceWords.slice(i, i + windowSize);
       const windowLower = new Set(window.map(w => w.toLowerCase()));
-      const overlap = [...windowLower].filter(w => newWords.has(w)).length;
+      const overlap = Array.from(windowLower).filter(w => newWords.has(w)).length;
       
       if (overlap > bestOverlap) {
         bestOverlap = overlap;

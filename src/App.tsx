@@ -3,12 +3,17 @@ import { get, set } from 'idb-keyval';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   addTerm,
+  addTerms,
+  deleteTerm,
   loadTermbase,
+  seedDefaultTermbase,
+  updateTerm,
   extractTermCandidates,
   parseTermComparisonText,
   type TermEntry,
+  type NewTermEntry,
 } from './termbase';
-import { buildRoleApiMap, planAgentAllocation, type RoleApiMap } from './agentOrchestrator';
+import { planAgentAllocation, type RoleApiMap } from './agentOrchestrator';
 import { 
   UploadCloud, 
   Languages, 
@@ -47,6 +52,15 @@ interface CustomApiConfig {
   apiKey: string;
   baseUrl: string;
   model: string;
+}
+
+interface ModelProfile extends CustomApiConfig {
+  id: string;
+  name: string;
+  provider: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 type AgentRole = 'planner' | 'executor' | 'proofreader';
@@ -176,7 +190,7 @@ const translations = {
     subTitle: "保留版式的本地文档智能翻译工具 (Bento Grid)",
     tagline: "全格式 (PDF, Word, PPTX, EPUB, MD) 本地无损翻译与排版对齐重建",
 
-    customApiTitle: "自定义及本地自建模型引擎 (Ollama / 兼容 API Preset)",
+    customApiTitle: "模型管理中心",
     customApiToggle: "启用第三方/本地运行 LLM 接口 (Ollama, DeepSeek 等)",
     modelSettings: "模型自定义参数与鉴权",
     apiKey: "API 密钥 (API Key)",
@@ -236,7 +250,7 @@ const translations = {
     subTitle: "Structure-Preserving Intelligent Document Translator (Bento Grid)",
     tagline: "Lossless layout-aligned translation for PDF, DOCX, PPTX, EPUB, and Markdown",
 
-    customApiTitle: "Custom & Local Autonomy LLM Engines (Ollama / API Presets)",
+    customApiTitle: "Model Management Center",
     customApiToggle: "Enable Third-party / Local LLM Integration (Ollama, DeepSeek)",
     modelSettings: "Model Configuration & Credentials",
     apiKey: "API Key",
@@ -487,12 +501,31 @@ export default function App() {
   const [showRepackConfirm, setShowRepackConfirm] = useState<boolean>(false);
   const [showClearConfirm, setShowClearConfirm] = useState<boolean>(false);
 
+  const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>(() => {
+    try {
+      const saved = localStorage.getItem('joebook-model-profiles');
+      if (saved) return JSON.parse(saved);
+    } catch (_) {}
+    return [];
+  });
+  const [defaultModelProfileId, setDefaultModelProfileId] = useState<string>(() => localStorage.getItem('joebook-default-model-profile-id') || '');
+  const [profileNotice, setProfileNotice] = useState<string>('');
   const [termbaseEntries, setTermbaseEntries] = useState<TermEntry[]>([]);
   const [termComparisonText, setTermComparisonText] = useState<string>('');
   const [termbaseNotice, setTermbaseNotice] = useState<string>('');
+  const [showTermbaseLibrary, setShowTermbaseLibrary] = useState<boolean>(() => localStorage.getItem('joebook_show_termbase') !== 'false');
+  const [termSearch, setTermSearch] = useState<string>('');
+  const [editingTermId, setEditingTermId] = useState<string>('');
+  const [termbaseEnabled, setTermbaseEnabled] = useState<boolean>(() => localStorage.getItem('joebook_termbase_enabled') !== 'false');
   const [agentOrchestrationEnabled, setAgentOrchestrationEnabled] = useState<boolean>(() => localStorage.getItem('joebook_agent_orchestration') === 'true');
   const [agentMaxExecutors, setAgentMaxExecutors] = useState<number>(() => Number(localStorage.getItem('joebook_agent_max_executors') || '4'));
-  const [agentRoleApi, setAgentRoleApi] = useState<Partial<RoleApiMap>>({});
+  const [agentRoleProfileIds, setAgentRoleProfileIds] = useState<Record<AgentRole, string>>(() => {
+    try {
+      const saved = localStorage.getItem('joebook-agent-role-config');
+      if (saved) return { planner: '', executor: '', proofreader: '', ...JSON.parse(saved) };
+    } catch (_) {}
+    return { planner: '', executor: '', proofreader: '' };
+  });
   const [agentStatus, setAgentStatus] = useState<string>('');
 
   // JoEbook editor utilities: find and replace across the bilingual workspace
@@ -556,6 +589,16 @@ export default function App() {
   useEffect(() => {
     loadTermbase().then(setTermbaseEntries).catch(() => setTermbaseEntries([]));
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('joebook-model-profiles', JSON.stringify(modelProfiles));
+      localStorage.setItem('joebook-default-model-profile-id', defaultModelProfileId);
+      localStorage.setItem('joebook-agent-role-config', JSON.stringify(agentRoleProfileIds));
+      localStorage.setItem('joebook_show_termbase', String(showTermbaseLibrary));
+      localStorage.setItem('joebook_termbase_enabled', String(termbaseEnabled));
+    } catch (_) {}
+  }, [modelProfiles, defaultModelProfileId, agentRoleProfileIds, showTermbaseLibrary, termbaseEnabled]);
 
   useEffect(() => {
     try {
@@ -698,9 +741,130 @@ const syncSourceDir = (fileList: File[]) => {
     setShowApiFields(true); // Open the detail drawer when a new preset is chosen so the user can see/edit
   };
 
+  const activeModelProfiles = modelProfiles.filter(p => p.enabled !== false);
+  const modelProfileOptions = activeModelProfiles.length > 0 ? activeModelProfiles : modelProfiles;
+
+  const getModelProfileById = (id?: string): ModelProfile | undefined => {
+    if (!id) return undefined;
+    return modelProfiles.find(p => p.id === id);
+  };
+
+  const saveCurrentModelAsProfile = () => {
+    const modelName = customApi.model || (selectedPreset === 'custom' ? 'Custom Model' : selectedPreset);
+    const profileName = `${selectedPreset === 'custom' ? 'Custom' : (llmPresets.find(p => p.id === selectedPreset)?.name || selectedPreset)} - ${modelName}`;
+    const now = new Date().toISOString();
+    const existingIdx = modelProfiles.findIndex(p => p.provider === selectedPreset && p.baseUrl === customApi.baseUrl && p.model === customApi.model);
+    let next: ModelProfile[];
+    let id: string;
+    if (existingIdx >= 0) {
+      id = modelProfiles[existingIdx].id;
+      next = modelProfiles.map((p, i) => i === existingIdx ? { ...p, ...customApi, name: p.name || profileName, provider: selectedPreset, enabled: true, updatedAt: now } : p);
+    } else {
+      id = crypto.randomUUID();
+      next = [...modelProfiles, { id, name: profileName, provider: selectedPreset, ...customApi, enabled: true, createdAt: now, updatedAt: now }];
+    }
+    setModelProfiles(next);
+    setDefaultModelProfileId(id);
+    if (!agentRoleProfileIds.planner && !agentRoleProfileIds.executor && !agentRoleProfileIds.proofreader) {
+      setAgentRoleProfileIds({ planner: id, executor: id, proofreader: id });
+    }
+    setProfileNotice(currentLang === 'zh' ? `已保存模型档案：${profileName}` : `Saved model profile: ${profileName}`);
+  };
+
+  const applyProfileAsCurrentModel = (profile: ModelProfile) => {
+    setSelectedPreset(profile.provider || 'custom');
+    setCustomApi({ apiKey: profile.apiKey || '', baseUrl: profile.baseUrl || '', model: profile.model || '' });
+    setUseCustomApi(true);
+    setDefaultModelProfileId(profile.id);
+    setShowApiFields(true);
+  };
+
+  const deleteModelProfile = (id: string) => {
+    setModelProfiles(prev => prev.filter(p => p.id !== id));
+    if (defaultModelProfileId === id) setDefaultModelProfileId('');
+    setAgentRoleProfileIds(prev => ({
+      planner: prev.planner === id ? '' : prev.planner,
+      executor: prev.executor === id ? '' : prev.executor,
+      proofreader: prev.proofreader === id ? '' : prev.proofreader,
+    }));
+  };
+
+  const resolveAgentRoleApis = (): RoleApiMap => {
+    const fallbackProfile = getModelProfileById(defaultModelProfileId);
+    const fallback = fallbackProfile || { id: 'current', name: 'Current', provider: selectedPreset, enabled: true, createdAt: '', updatedAt: '', ...customApi };
+    const toApi = (id: string) => {
+      const p = getModelProfileById(id) || fallback;
+      return { apiKey: p.apiKey || '', baseUrl: p.baseUrl || '', model: p.model || '' };
+    };
+    return {
+      planner: toApi(agentRoleProfileIds.planner),
+      executor: toApi(agentRoleProfileIds.executor),
+      proofreader: toApi(agentRoleProfileIds.proofreader),
+    };
+  };
+
+  const buildAgentPlanPayload = () => {
+  const plan = planAgentAllocation({
+  totalItems: files.length > 1 ? files.length : Math.max(originalParagraphs.length, files.length || 1),
+  batchSize: isInteractiveMode ? 40 : 2,
+  maxExecutors: agentMaxExecutors,
+  enableProofreader: true,
+  roleApi: resolveAgentRoleApis(),
+  });
+  const resolvedProfiles: Record<AgentRole, { apiKey: string; baseUrl: string; model: string } | null> = {
+  planner: null,
+  executor: null,
+  proofreader: null,
+  };
+  for (const role of ['planner', 'executor', 'proofreader'] as AgentRole[]) {
+  const p = getModelProfileById(agentRoleProfileIds[role]) || getModelProfileById(defaultModelProfileId);
+  if (p) {
+  resolvedProfiles[role] = { apiKey: p.apiKey || '', baseUrl: p.baseUrl || '', model: p.model || '' };
+  }
+  }
+  return {
+  ...plan,
+  enabled: agentOrchestrationEnabled,
+  roleProfileIds: agentRoleProfileIds,
+  modelProfiles: resolvedProfiles,
+  };
+  };
+
+
+// ── Language detection ──
+const LANG_PATTERNS: Record<string, RegExp> = {
+  'en': /^[a-zA-Z\s\-]+$/,
+  'zh-CN': /[\u4e00-\u9fff]/,
+  'zh-TW': /[\u4e00-\u9fff]/,
+  'ja': /[\u3040-\u309f\u30a0-\u30ff]/,
+  'ko': /[\uac00-\ud7af]/,
+  'fr': /^[a-zA-Z\u00c0-\u017f\s\-]+$/,
+  'de': /^[a-zA-Z\u00c4\u00e4\u00d6\u00f6\u00dc\u00fc\u00df\s\-]+$/,
+  'es': /^[a-zA-Z\u00e1\u00e9\u00ed\u00f1\u00f3\u00fa\u00fc\s\-]+$/,
+  'ar': /[\u0600-\u06ff]/,
+  'ru': /[\u0400-\u04ff]/,
+};
+
+function detectLanguage(text: string): string {
+  if (!text.trim()) return 'Auto';
+  if (LANG_PATTERNS['zh-CN'].test(text)) return 'zh-CN';
+  if (LANG_PATTERNS['ja'].test(text)) return 'ja';
+  if (LANG_PATTERNS['ko'].test(text)) return 'ko';
+  if (LANG_PATTERNS['ar'].test(text)) return 'ar';
+  if (LANG_PATTERNS['ru'].test(text)) return 'ru';
+  if (LANG_PATTERNS['fr'].test(text)) return 'fr';
+  if (LANG_PATTERNS['de'].test(text)) return 'de';
+  if (LANG_PATTERNS['es'].test(text)) return 'es';
+  if (LANG_PATTERNS['en'].test(text)) return 'en';
+  return 'Auto';
+}
   // Pull / Fetch available models from custom API endpoint dynamically
   const getActiveGlossaryTerms = async () => {
     const terms = await loadTermbase();
+    if (!termbaseEnabled) {
+      setTermbaseEntries(terms);
+      return [];
+    }
     const active = terms
       .filter(t => (!t.sourceLang || t.sourceLang === sourceLang || sourceLang === 'Auto') && (!t.targetLang || t.targetLang === targetLang))
       .sort((a, b) => (b.confirmed === a.confirmed ? b.frequency - a.frequency : b.confirmed ? 1 : -1))
@@ -712,13 +876,75 @@ const syncSourceDir = (fileList: File[]) => {
 
   const handleImportTermComparison = async () => {
     const parsed = parseTermComparisonText(termComparisonText, { sourceLang, targetLang, domain: 'custom', confirmed: true });
-    for (const entry of parsed) await addTerm(entry);
-    const latest = await loadTermbase();
-    setTermbaseEntries(latest);
-    setTermbaseNotice(currentLang === 'zh' ? `已导入 ${parsed.length} 条自定义术语。` : `Imported ${parsed.length} custom terms.`);
+    if (parsed.length === 0) {
+      setTermbaseNotice(currentLang === 'zh' ? '未识别到有效术语，请使用 source => target 格式。' : 'No valid terms detected. Use source => target format.');
+      return;
+    }
+    const result = await addTerms(parsed as NewTermEntry[]);
+    setTermbaseEntries(result.entries);
+    setTermbaseNotice(currentLang === 'zh' ? `已新增 ${result.imported} 条，更新 ${result.updated} 条，跳过 ${result.skipped} 条。` : `Added ${result.imported}, updated ${result.updated}, skipped ${result.skipped}.`);
     setTermComparisonText('');
   };
 
+  const handleSeedDefaultTerms = async () => {
+    const result = await seedDefaultTermbase();
+    setTermbaseEntries(result.entries);
+    setTermbaseNotice(currentLang === 'zh' ? `默认术语库已导入/更新：新增 ${result.imported} 条，更新 ${result.updated} 条。` : `Default termbase imported/updated: ${result.imported} added, ${result.updated} updated.`);
+  };
+
+  const handleUpdateTerm = async (id: string, updates: Partial<TermEntry>) => {
+    await updateTerm(id, updates);
+    setTermbaseEntries(await loadTermbase());
+  };
+
+  const handleDeleteTerm = async (id: string) => {
+    await deleteTerm(id);
+    setTermbaseEntries(await loadTermbase());
+  };
+
+  const fileImportRef = useRef<HTMLInputElement>(null);
+  const [importingFile, setImportingFile] = useState(false);
+
+  const handleFileImportTerms = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportingFile(true);
+    setTermbaseNotice('');
+    try {
+      const text = await file.text();
+      const ext = file.name.split('.').pop()?.toLowerCase();
+      let imported = 0, skipped = 0;
+      if (ext === 'json') {
+        const { importTermbaseJSON } = await import('./termbase');
+        const result = await importTermbaseJSON(text, true);
+        imported = result.imported; skipped = result.skipped;
+      } else if (ext === 'csv') {
+        const { importTermbaseCSV } = await import('./termbase');
+        const result = await importTermbaseCSV(text);
+        imported = result.imported; skipped = result.skipped;
+      } else {
+        const { parseTermComparisonText, addTerms: addT } = await import('./termbase');
+        const detectedSourceLang = detectLanguage(text.split(/[\n=>→]/)[0] || text.substring(0, 50));
+        const entries = parseTermComparisonText(text, { sourceLang: detectedSourceLang, targetLang, domain: 'imported', confirmed: true });
+        if (entries.length === 0) {
+          setTermbaseNotice(currentLang === 'zh' ? '未识别到有效术语。支持 JSON/CSV/文本格式。' : 'No valid terms detected. Supports JSON/CSV/text formats.');
+          setImportingFile(false);
+          if (fileImportRef.current) fileImportRef.current.value = '';
+          return;
+        }
+        const result = await addT(entries as any);
+        imported = result.imported; skipped = result.skipped;
+      }
+      const latest = await loadTermbase();
+      setTermbaseEntries(latest);
+      setTermbaseNotice(currentLang === 'zh' ? `已从文件 "${file.name}" 导入 ${imported} 条，跳过 ${skipped} 条。` : `Imported ${imported}, skipped ${skipped} from "${file.name}".`);
+    } catch (err: any) {
+      setTermbaseNotice(currentLang === 'zh' ? `导入失败: ${err.message}` : `Import failed: ${err.message}`);
+    } finally {
+      setImportingFile(false);
+      if (fileImportRef.current) fileImportRef.current.value = '';
+    }
+  };
   const learnTermsFromEdit = async (idx: number, oldTranslation: string, newTranslation: string) => {
     const candidates = extractTermCandidates(originalParagraphs[idx] || '', oldTranslation || '', newTranslation || '')
       .filter(c => c.confidence >= 0.5 && c.source && c.target)
@@ -733,13 +959,7 @@ const syncSourceDir = (fileList: File[]) => {
     }
   };
 
-  const currentAgentPlan = planAgentAllocation({
-    totalItems: files.length > 1 ? files.length : Math.max(originalParagraphs.length, files.length || 1),
-    batchSize: isInteractiveMode ? 20 : 2,
-    maxExecutors: agentMaxExecutors,
-    enableProofreader: true,
-    roleApi: buildRoleApiMap(customApi, agentRoleApi),
-  });
+  const currentAgentPlan = buildAgentPlanPayload();
 
   const fetchAvailableModels = async () => {
     if (!customApi.baseUrl) {
@@ -944,8 +1164,8 @@ const syncSourceDir = (fileList: File[]) => {
         const response = await fetch(`/api/progress/${sId}`);
         if (response.ok) {
           const data = await response.json();
-          setProgressPercent(data.progress || 10);
-          setStagesMessage(data.status || 'Translating segments...');
+ setProgressPercent(typeof data.progress === 'number' ? data.progress : 0);
+ setStagesMessage(data.status || 'Translating segments...');
           
           if (data.error) {
               clearInterval(progressPollingRef.current);
@@ -1738,7 +1958,7 @@ const syncSourceDir = (fileList: File[]) => {
           batchSize: 2,
           maxExecutors: agentMaxExecutors,
           enableProofreader: true,
-          roleApi: buildRoleApiMap(customApi, agentRoleApi),
+          roleApi: resolveAgentRoleApis(),
         });
         formData.append('agentPlan', JSON.stringify(plan));
         setAgentStatus(plan.summary);
@@ -3139,7 +3359,7 @@ const syncSourceDir = (fileList: File[]) => {
                       </div>
 
                       {/* Explicit Save API Configuration Button */}
-                      <div className="pt-1">
+                      <div className="pt-1 space-y-2">
                         <button
                           type="button"
                           id="save_settings_btn"
@@ -3158,6 +3378,14 @@ const syncSourceDir = (fileList: File[]) => {
                             </>
                           )}
                         </button>
+                        <button
+                          type="button"
+                          onClick={saveCurrentModelAsProfile}
+                          className="w-full py-2 px-4 rounded-lg font-semibold text-xs transition-all flex items-center justify-center space-x-2 border cursor-pointer bg-emerald-700 hover:bg-emerald-600 border-emerald-600 text-white"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span>{currentLang === 'zh' ? '保存为模型档案' : 'Save as Model Profile'}</span>
+                        </button>
                       </div>
                     </motion.div>
                   )}
@@ -3165,8 +3393,26 @@ const syncSourceDir = (fileList: File[]) => {
 
 
               </div>
-              <div className="mt-4 text-[10px] text-zinc-500 border-t border-zinc-800/40 pt-3">
-                {t.presetInfo}
+              <div className="mt-4 border-t border-zinc-800/40 pt-3 space-y-2">
+                <div className="flex items-center justify-between text-[10px] text-zinc-400 font-bold uppercase tracking-wider">
+                  <span>{currentLang === 'zh' ? '已保存模型档案' : 'Saved Model Profiles'}</span>
+                  <span>{modelProfiles.length}</span>
+                </div>
+                {profileNotice && <p className="text-[10px] text-emerald-400">{profileNotice}</p>}
+                <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                  {modelProfiles.length === 0 ? (
+                    <p className="text-[10px] text-zinc-500">{currentLang === 'zh' ? '暂无模型档案。请填写 API 后点击“保存为模型档案”。' : 'No profiles yet. Fill API fields and save as profile.'}</p>
+                  ) : modelProfiles.map(profile => (
+                    <div key={profile.id} className="p-2 rounded-lg bg-zinc-950/60 border border-zinc-800 text-[10px] flex items-center justify-between gap-2">
+                      <button type="button" onClick={() => applyProfileAsCurrentModel(profile)} className="text-left min-w-0 flex-1">
+                        <div className="font-bold text-zinc-200 truncate">{profile.name}</div>
+                        <div className="text-zinc-500 truncate font-mono">{profile.model}</div>
+                      </button>
+                      <button type="button" onClick={() => deleteModelProfile(profile.id)} className="text-red-400 hover:text-red-300 px-1"><Trash2 className="w-3.5 h-3.5" /></button>
+                    </div>
+                  ))}
+                </div>
+                <div className="text-[10px] text-zinc-500 pt-1">{t.presetInfo}</div>
               </div>
             </motion.div>
           )}
@@ -3176,22 +3422,275 @@ const syncSourceDir = (fileList: File[]) => {
           <div>
             <h3 className="text-xs font-bold text-zinc-300 uppercase tracking-widest mb-2 flex items-center gap-2">
               <BookOpen className="w-4 h-4 text-emerald-400" />
-              {currentLang === 'zh' ? '翻译术语记忆' : 'Terminology Memory'}
+              {currentLang === 'zh' ? '翻译术语记忆库' : 'Translation Termbase Memory'}
             </h3>
-            <textarea
-              value={termComparisonText}
-              onChange={(e) => setTermComparisonText(e.target.value)}
-              placeholder={currentLang === 'zh' ? '每行一条：Model Context Protocol => 模型上下文协议' : 'One per line: source => target'}
-              rows={4}
-              className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-3 text-xs text-zinc-200 font-mono focus:outline-none focus:border-emerald-500"
-            />
-            <div className="mt-2 flex items-center justify-between gap-3">
-              <span className="text-[10px] text-zinc-500">{currentLang === 'zh' ? `当前记忆 ${termbaseEntries.length} 条；校对修改会自动学习候选术语。` : `${termbaseEntries.length} terms in memory; proofreading edits are learned automatically.`}</span>
-              <button type="button" onClick={handleImportTermComparison} className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold">
-                {currentLang === 'zh' ? '导入术语' : 'Import Terms'}
-              </button>
+            <div className="bg-zinc-950/50 border border-zinc-800 rounded-xl p-3 space-y-3">
+<div className="flex items-center justify-between gap-3">
+                <label className="flex items-center gap-2 text-xs text-zinc-300">
+                  <input type="checkbox" checked={termbaseEnabled} onChange={(e) => setTermbaseEnabled(e.target.checked)} />
+                  <span>{currentLang === 'zh' ? '\u542f\u7528\u672f\u8bed\u8bb0\u5fc6' : 'Enable termbase memory'}</span>
+                </label>
+                <button type="button" onClick={() => setShowTermbaseLibrary(v => !v)} className="px-2 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-[10px] text-zinc-200">
+                  {showTermbaseLibrary ? (currentLang === 'zh' ? '\u6536\u8d77\u672f\u8bed\u5e93' : 'Close Library') : (currentLang === 'zh' ? '\u6253\u5f00\u672f\u8bed\u5e93' : 'Open Library')}
+                </button>
+              </div>
+{/* Custom add row - table inline form */}
+<div className="border border-dashed border-zinc-700 rounded-lg p-2">
+<div className="grid grid-cols-12 gap-2 items-center text-[10px]">
+<span className="col-span-3 font-semibold text-zinc-400">{currentLang === 'zh' ? '原文术语' : 'Source'}</span>
+<span className="col-span-1 font-semibold text-zinc-400">{currentLang === 'zh' ? '源语言' : 'Lang'}</span>
+<span className="col-span-3 font-semibold text-zinc-400">{currentLang === 'zh' ? '译文术语' : 'Target'}</span>
+<span className="col-span-1 font-semibold text-zinc-400">{currentLang === 'zh' ? '目标语言' : 'TgtL'}</span>
+<span className="col-span-1 font-semibold text-zinc-400">{currentLang === 'zh' ? '领域' : 'Domain'}</span>
+<span className="col-span-3"></span>
+</div>
+<div className="grid grid-cols-12 gap-1.5 items-center mt-1.5">
+<input
+placeholder={currentLang === 'zh' ? '输入原文...' : 'Source term...'}
+className="col-span-3 bg-zinc-950/80 border border-zinc-800 rounded-lg px-2 py-1.5 text-[10px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-600"
+id="term-add-source"
+onInput={(e: React.FormEvent<HTMLInputElement>) => {
+const val = (e.target as HTMLInputElement).value;
+const langEl = document.getElementById('term-add-source-lang') as HTMLSelectElement;
+if (langEl && langEl.value === 'Auto' && val.trim()) {
+const detected = detectLanguage(val);
+const displayEl = document.getElementById('term-add-source-lang-display') as HTMLSpanElement;
+if (displayEl) displayEl.textContent = detected !== 'Auto' ? detected : '--';
+}
+}}
+/>
+<select
+className="col-span-1 bg-zinc-950/80 border border-zinc-800 rounded-lg px-0.5 py-1.5 text-[9px] text-zinc-300"
+id="term-add-source-lang"
+defaultValue="Auto"
+onChange={(e) => {
+const displayEl = document.getElementById('term-add-source-lang-display') as HTMLSpanElement;
+if (displayEl) displayEl.textContent = e.target.value === 'Auto' ? (currentLang === 'zh' ? '自动' : 'auto') : e.target.value;
+}}
+>
+<option value="Auto">{currentLang === 'zh' ? '自动' : 'Auto'}</option>
+<option value="en">en</option>
+<option value="zh-CN">zh-CN</option>
+<option value="zh-TW">zh-TW</option>
+<option value="ja">ja</option>
+<option value="ko">ko</option>
+<option value="fr">fr</option>
+<option value="de">de</option>
+<option value="es">es</option>
+<option value="ru">ru</option>
+<option value="ar">ar</option>
+<option value="custom">{currentLang === 'zh' ? '自定义...' : 'Custom...'}</option>
+</select>
+<input
+placeholder={currentLang === 'zh' ? '输入译文...' : 'Target term...'}
+className="col-span-3 bg-zinc-950/80 border border-zinc-800 rounded-lg px-2 py-1.5 text-[10px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-600"
+id="term-add-target"
+/>
+<select
+className="col-span-1 bg-zinc-950/80 border border-zinc-800 rounded-lg px-0.5 py-1.5 text-[9px] text-zinc-300"
+id="term-add-target-lang"
+defaultValue=""
+>
+<option value="">{currentLang === 'zh' ? '默认' : 'Default'}</option>
+<option value="en">en</option>
+<option value="zh-CN">zh-CN</option>
+<option value="zh-TW">zh-TW</option>
+<option value="ja">ja</option>
+<option value="ko">ko</option>
+<option value="fr">fr</option>
+<option value="de">de</option>
+<option value="es">es</option>
+<option value="ru">ru</option>
+<option value="ar">ar</option>
+</select>
+<input
+placeholder={currentLang === 'zh' ? '领域' : 'domain'}
+className="col-span-1 bg-zinc-950/80 border border-zinc-800 rounded-lg px-1 py-1.5 text-[9px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-600"
+id="term-add-domain"
+defaultValue="manual"
+/>
+<div className="col-span-3 flex gap-1 items-center">
+<button type="button"
+onClick={async () => {
+const srcEl = document.getElementById('term-add-source') as HTMLInputElement;
+const tgtEl = document.getElementById('term-add-target') as HTMLInputElement;
+const langEl = document.getElementById('term-add-source-lang') as HTMLSelectElement;
+const tgtLangEl = document.getElementById('term-add-target-lang') as HTMLSelectElement;
+const domainEl = document.getElementById('term-add-domain') as HTMLInputElement;
+const customLangEl = document.getElementById('term-add-source-lang-custom') as HTMLInputElement;
+const src = (srcEl?.value || '').trim();
+const tgt = (tgtEl?.value || '').trim();
+if (!src || !tgt) { setTermbaseNotice(currentLang === 'zh' ? '请填写原文和译文' : 'Fill source and target'); return; }
+let detectedLang = langEl.value === 'Auto' ? detectLanguage(src) : langEl.value;
+if (langEl.value === 'custom' && customLangEl?.value?.trim()) detectedLang = customLangEl.value.trim();
+const tgtLang = tgtLangEl?.value || targetLang;
+const domain = (domainEl?.value || '').trim() || 'manual';
+await addTerm({ source: src, target: tgt, sourceLang: detectedLang, targetLang: tgtLang, domain, confirmed: true });
+setTermbaseEntries(await loadTermbase());
+if (srcEl) srcEl.value = ''; if (tgtEl) tgtEl.value = ''; if (domainEl) domainEl.value = 'manual';
+setTermbaseNotice(currentLang === 'zh' ? `已添加: ${src} => ${tgt}` : `Added: ${src} => ${tgt}`);
+}}
+className="flex-1 px-2 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-semibold flex items-center justify-center gap-1"
+><Plus className="w-3 h-3" /><span>{currentLang === 'zh' ? '添加' : 'Add'}</span></button>
+<span id="term-add-source-lang-display" className="text-[9px] text-emerald-500 min-w-[28px] text-center">{currentLang === 'zh' ? '自动' : 'auto'}</span>
+</div>
+</div>
+</div>
+{/* Action bar with file import */}
+<div className="flex items-center justify-between gap-2 flex-wrap">
+<span className="text-[10px] text-zinc-500">{currentLang === 'zh' ? `当前记忆 ${termbaseEntries.length} 条` : `${termbaseEntries.length} terms in memory`}</span>
+<div className="flex gap-2 flex-wrap">
+<button type="button" onClick={handleSeedDefaultTerms} className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white text-[10px] font-semibold">
+{currentLang === 'zh' ? '导入默认术语' : 'Import Defaults'}
+</button>
+<label className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-semibold cursor-pointer flex items-center gap-1">
+<UploadCloud className="w-3 h-3" />
+{importingFile ? (currentLang === 'zh' ? '导入中...' : 'Importing...') : (currentLang === 'zh' ? '导入文件' : 'Import File')}
+<input type="file" ref={fileImportRef} accept=".json,.csv,.txt,.tsv" onChange={handleFileImportTerms} className="hidden" />
+</label>
+<button type="button" onClick={async () => {
+const csv = await (await import('./termbase')).exportTermbaseCSV();
+const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+const url = URL.createObjectURL(blob);
+const a = document.createElement('a'); a.href = url; a.download = 'joebook_termbase.csv'; a.click();
+URL.revokeObjectURL(url);
+}} className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white text-[10px] font-semibold">
+{currentLang === 'zh' ? '导出CSV' : 'Export CSV'}
+</button>
+<button type="button" onClick={async () => {
+const json = await (await import('./termbase')).exportTermbaseJSON();
+const blob = new Blob([json], { type: 'application/json' });
+const url = URL.createObjectURL(blob);
+const a = document.createElement('a'); a.href = url; a.download = 'joebook_termbase.json'; a.click();
+URL.revokeObjectURL(url);
+}} className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white text-[10px] font-semibold">
+{currentLang === 'zh' ? '导出JSON' : 'Export JSON'}
+</button>
+</div>
+</div>
+{/* Drag-and-drop import zone */}
+<div
+className="border-2 border-dashed border-zinc-800 hover:border-indigo-600 rounded-lg p-3 text-center transition-colors cursor-pointer"
+onClick={() => fileImportRef.current?.click()}
+onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.add('border-indigo-500', 'bg-indigo-950/20'); }}
+onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.remove('border-indigo-500', 'bg-indigo-950/20'); }}
+onDrop={async (e) => {
+e.preventDefault(); e.stopPropagation();
+e.currentTarget.classList.remove('border-indigo-500', 'bg-indigo-950/20');
+const droppedFile = e.dataTransfer.files[0];
+if (!droppedFile) return;
+setImportingFile(true);
+setTermbaseNotice('');
+try {
+const text = await droppedFile.text();
+const ext = droppedFile.name.split('.').pop()?.toLowerCase();
+let imported = 0, skipped = 0;
+if (ext === 'json') {
+const { importTermbaseJSON } = await import('./termbase');
+const result = await importTermbaseJSON(text, true);
+imported = result.imported; skipped = result.skipped;
+} else if (ext === 'csv') {
+const { importTermbaseCSV } = await import('./termbase');
+const result = await importTermbaseCSV(text);
+imported = result.imported; skipped = result.skipped;
+} else {
+const { parseTermComparisonText, addTerms: addT } = await import('./termbase');
+const detectedSourceLang = detectLanguage(text.split(/[\n=>→]/)[0] || text.substring(0, 50));
+const entries = parseTermComparisonText(text, { sourceLang: detectedSourceLang, targetLang, domain: 'imported', confirmed: true });
+if (entries.length === 0) {
+setTermbaseNotice(currentLang === 'zh' ? '未识别到有效术语。支持 JSON/CSV/文本格式。' : 'No valid terms detected. Supports JSON/CSV/text formats.');
+setImportingFile(false); return;
+}
+const result = await addT(entries as any);
+imported = result.imported; skipped = result.skipped;
+}
+const latest = await loadTermbase();
+setTermbaseEntries(latest);
+setTermbaseNotice(currentLang === 'zh' ? `已从文件 "${droppedFile.name}" 导入 ${imported} 条，跳过 ${skipped} 条。` : `Imported ${imported}, skipped ${skipped} from "${droppedFile.name}".`);
+} catch (err: any) {
+setTermbaseNotice(currentLang === 'zh' ? `导入失败: ${err.message}` : `Import failed: ${err.message}`);
+} finally { setImportingFile(false); }
+}}
+>
+<FileSpreadsheet className="w-5 h-5 mx-auto text-zinc-600 mb-1" />
+<p className="text-[10px] text-zinc-500">{currentLang === 'zh' ? '拖拽文件到此处导入 (JSON / CSV / TXT / TSV)' : 'Drop file here to import (JSON / CSV / TXT / TSV)'}</p>
+</div>
+              {termbaseNotice && <p className="text-[10px] text-emerald-400">{termbaseNotice}</p>}
+              {showTermbaseLibrary && (
+                <div className="border-t border-zinc-800 pt-3 space-y-2">
+                  <input
+                    value={termSearch}
+                    onChange={(e) => setTermSearch(e.target.value)}
+                    placeholder={currentLang === 'zh' ? '\u641c\u7d22\u672f\u8bed...' : 'Search terms...'}
+                    className="w-full bg-zinc-950/80 border border-zinc-800 rounded-lg px-3 py-2 text-[10px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-600"
+                  />
+ {/* Table header */}
+<div className="grid grid-cols-12 gap-1 text-[9px] font-semibold text-zinc-500 uppercase tracking-wider px-1">
+<span className="col-span-3">{currentLang === 'zh' ? '原文术语' : 'Source'}</span>
+<span className="col-span-1">{currentLang === 'zh' ? '源语言' : 'SrcL'}</span>
+<span className="col-span-3">{currentLang === 'zh' ? '译文术语' : 'Target'}</span>
+<span className="col-span-1">{currentLang === 'zh' ? '目标语言' : 'TgtL'}</span>
+<span className="col-span-1 text-center">{currentLang === 'zh' ? '频次' : 'Freq'}</span>
+<span className="col-span-2 text-center">{currentLang === 'zh' ? '领域/状态' : 'Domain/Status'}</span>
+<span className="col-span-1"></span>
+</div>
+<div className="max-h-80 overflow-y-auto space-y-1">
+{termbaseEntries
+.filter(term => !termSearch || `${term.source} ${term.target} ${term.domain}`.toLowerCase().includes(termSearch.toLowerCase()))
+.slice(0, 300)
+.map(term => (
+<div key={term.id} className="grid grid-cols-12 gap-1 items-center bg-zinc-900/70 border border-zinc-800 rounded-lg p-1.5 text-[10px] group">
+<input value={term.source} onChange={(e) => handleUpdateTerm(term.id, { source: e.target.value })} className="col-span-3 bg-zinc-950 border border-zinc-800 rounded px-1.5 py-1 text-zinc-100 w-full" />
+<select
+value={term.sourceLang || 'Auto'}
+onChange={(e) => handleUpdateTerm(term.id, { sourceLang: e.target.value })}
+className="col-span-1 bg-zinc-950 border border-zinc-800 rounded px-0.5 py-1 text-[9px] text-zinc-300"
+>
+<option value="Auto">Auto</option>
+<option value="en">en</option>
+<option value="zh-CN">zh-CN</option>
+<option value="zh-TW">zh-TW</option>
+<option value="ja">ja</option>
+<option value="ko">ko</option>
+<option value="fr">fr</option>
+<option value="de">de</option>
+<option value="es">es</option>
+<option value="ru">ru</option>
+<option value="ar">ar</option>
+</select>
+<input value={term.target} onChange={(e) => handleUpdateTerm(term.id, { target: e.target.value })} className="col-span-3 bg-zinc-950 border border-zinc-800 rounded px-1.5 py-1 text-zinc-100 w-full" />
+<select
+value={term.targetLang || ''}
+onChange={(e) => handleUpdateTerm(term.id, { targetLang: e.target.value })}
+className="col-span-1 bg-zinc-950 border border-zinc-800 rounded px-0.5 py-1 text-[9px] text-zinc-300"
+>
+<option value="">{currentLang === 'zh' ? '默认' : 'Dft'}</option>
+<option value="en">en</option>
+<option value="zh-CN">zh-CN</option>
+<option value="zh-TW">zh-TW</option>
+<option value="ja">ja</option>
+<option value="ko">ko</option>
+<option value="fr">fr</option>
+<option value="de">de</option>
+<option value="es">es</option>
+<option value="ru">ru</option>
+<option value="ar">ar</option>
+</select>
+<span className="col-span-1 text-zinc-500 text-center text-[9px]">{term.frequency}</span>
+<div className="col-span-2 flex flex-col items-center gap-0.5">
+<span className="text-[8px] text-zinc-600 truncate max-w-full">{term.domain || '--'}</span>
+<span className={"text-[9px] " + (term.confirmed ? "text-emerald-500" : "text-amber-500")}>{term.confirmed ? "\u2713" : "~"}</span>
+</div>
+<button type="button" onClick={() => handleDeleteTerm(term.id)} className="col-span-1 text-red-400 hover:text-red-300 flex justify-center opacity-50 group-hover:opacity-100 transition-opacity"><Trash2 className="w-3.5 h-3.5" /></button>
+</div>
+))}
+{termbaseEntries.length === 0 && (
+<p className="text-[10px] text-zinc-600 text-center py-4">{currentLang === 'zh' ? '术语库为空，使用上方表格添加或导入。' : 'Termbase is empty. Add or import terms above.'}</p>
+)}
+</div>
+                </div>
+              )}
             </div>
-            {termbaseNotice && <p className="mt-2 text-[10px] text-emerald-400">{termbaseNotice}</p>}
           </div>
 
           <div>
@@ -3208,18 +3707,34 @@ const syncSourceDir = (fileList: File[]) => {
                 {currentLang === 'zh' ? '最多执行智能体数量' : 'Max executor agents'}
                 <input type="number" min={1} max={12} value={agentMaxExecutors} onChange={(e) => setAgentMaxExecutors(Number(e.target.value) || 1)} className="mt-1 w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-xs text-white" />
               </label>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              {modelProfileOptions.length === 0 && (
+                <p className="text-[10px] text-amber-400 bg-amber-950/20 border border-amber-900/30 rounded p-2">
+                  {currentLang === 'zh' ? '请先在模型管理中心保存至少一个模型档案，智能体将从这里引用模型。' : 'Save at least one model profile in Model Management Center first.'}
+                </p>
+              )}
+              <div className="grid grid-cols-1 gap-2">
                 {(['planner','executor','proofreader'] as AgentRole[]).map(role => (
-                  <input
-                    key={role}
-                    value={(agentRoleApi[role]?.model || '')}
-                    onChange={(e) => setAgentRoleApi(prev => ({ ...prev, [role]: { ...(prev[role] || {}), model: e.target.value } }))}
-                    placeholder={`${role} model`}
-                    className="bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-[10px] text-white font-mono"
-                  />
+                  <label key={role} className="block text-[10px] text-zinc-500 uppercase font-bold">
+                    {role === 'planner' ? (currentLang === 'zh' ? '规划智能体模型' : 'Planner Model') : role === 'executor' ? (currentLang === 'zh' ? '执行智能体模型' : 'Executor Model') : (currentLang === 'zh' ? '校对智能体模型' : 'Proofreader Model')}
+                    <select
+                      value={agentRoleProfileIds[role] || ''}
+                      onChange={(e) => setAgentRoleProfileIds(prev => ({ ...prev, [role]: e.target.value }))}
+                      className="mt-1 w-full bg-zinc-900 border border-zinc-800 rounded-lg p-2 text-xs text-white"
+                    >
+                      <option value="">{currentLang === 'zh' ? '使用默认模型档案' : 'Use default profile'}</option>
+                      {modelProfileOptions.map(profile => (
+                        <option key={profile.id} value={profile.id}>{profile.name} · {profile.model}</option>
+                      ))}
+                    </select>
+                  </label>
                 ))}
               </div>
               <p className="text-[10px] text-indigo-300">{agentStatus || currentAgentPlan.summary}</p>
+              <p className="text-[10px] text-zinc-500">
+                {currentLang === 'zh'
+                  ? `工作量估算：${currentAgentPlan.totalItems} 项；执行批次：${currentAgentPlan.executorBatches.length}`
+                  : `Workload: ${currentAgentPlan.totalItems}; executor batches: ${currentAgentPlan.executorBatches.length}`}
+              </p>
             </div>
           </div>
         </div>
