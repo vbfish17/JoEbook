@@ -1762,11 +1762,22 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
   Promise.resolve().then(async () => {
     try {
  const translateRunner = async (textBatch: string[]): Promise<string[]> => {
- const translated = await translateTextBatch(textBatch, sourceLang, targetLang, tone, apiForRole(agentPlan, 'executor', customApi), false, glossaryTerms);
-        console.log('[translateRunner] batch in', textBatch);
-        console.log('[translateRunner] batch out', translated);
-        return translated;
-      };
+ let translated = await translateTextBatch(textBatch, sourceLang, targetLang, tone, apiForRole(agentPlan, 'executor', customApi), false, glossaryTerms);
+ // Proofreader phase: if agent plan is enabled and proofreader API is configured
+ if (isAgentPlanEnabled(agentPlan)) {
+ const proofreaderApi = apiForRole(agentPlan, 'proofreader', customApi);
+ if (proofreaderApi?.baseUrl) {
+ try {
+ translated = await proofreadBatch(textBatch, translated, sourceLang, targetLang, proofreaderApi, glossaryTerms);
+ } catch (err: any) {
+ console.warn('[proofreader] Batch proofreading failed:', err.message);
+ }
+ }
+ }
+ console.log('[translateRunner] batch in', textBatch);
+ console.log('[translateRunner] batch out', translated);
+ return translated;
+ };
 
       let outputBuffer: Buffer | null = null;
       let outputName = '';
@@ -1859,14 +1870,17 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
       updateProgress(100, '翻译与排版完成！文档在缓存中准备下载...');
       if (activeSessions[sId]) activeSessions[sId].outputReady = true;
 
-    } catch (err: any) {
-      console.error(`Error during background translation handling:`, err);
-      let errorMsg = err.message || 'Unknown translation error';
-      if (errorMsg.includes('403') || errorMsg.includes('PERMISSION_DENIED') || errorMsg.includes('denied access')) {
-        errorMsg = '【引擎访问限制 / 403 PERMISSION_DENIED】检测到内置公用 Gemini 接口受到开发沙盒网络/权限限制暂不可用。JoEbook 已为您集成本地/第三方大模型免密与配置机制：请点击页面右上角【设置 (齿轮) 按钮】，启用【第三方及自建模型】，切换使用您自己的 API 密钥 (我们为您预设了 Gemini 2.5 Official, DeepSeek, OpenAI, Ollama 快捷填表模板)，即可 100% 成功启动完美排版翻译！\n\n[Platform Info] Standard backend sandbox denied access (403). Please click the Settings icon in the top right, turn on the custom LLM integration toggle, and enter your own API Key using the Gemini 2.5 or DeepSeek/OpenAI autocomplete presets to enjoy high-speed layout-preserving document translation!';
-      }
-      activeSessions[sId] = { status: `出错: ${errorMsg}`, progress: -1, error: true, errorMsg };
-    }
+ } catch (err: any) {
+ console.error(`Error during background translation handling:`, err);
+ let errorMsg = err.message || 'Unknown translation error';
+ if (errorMsg.includes('403') || errorMsg.includes('PERMISSION_DENIED') || errorMsg.includes('denied access')) {
+ errorMsg = '【引擎访问限制 / 403 PERMISSION_DENIED】检测到内置公用 Gemini 接口受到开发沙盒网络/权限限制暂不可用。JoEbook 已为您集成本地/第三方大模型免密与配置机制：请点击页面右上角【设置 (齿轮) 按钮】，启用【第三方及自建模型】，切换使用您自己的 API 密钥 (我们为您预设了 Gemini 2.5 Official, DeepSeek, OpenAI, Ollama 快捷填表模板)，即可 100% 成功启动完美排版翻译！\n\n[Platform Info] Standard backend sandbox denied access (403). Please click the Settings icon in the top right, turn on the custom LLM integration toggle, and enter your own API Key using the Gemini 2.5 or DeepSeek/OpenAI autocomplete presets to enjoy high-speed layout-preserving document translation!';
+ }
+ if (errorMsg.includes('LLM API error') || errorMsg.includes('ECONNREFUSED') || errorMsg.includes('fetch failed')) {
+ errorMsg = `【模型接口连接失败】${errorMsg}\n\n请检查 API Base URL 和 Model 是否正确配置。如启用了智能体编排，请确认各角色模型档案已正确设置。`;
+ }
+ activeSessions[sId] = { status: `出错: ${errorMsg}`, progress: -1, error: true, errorMsg };
+ }
   });
 
   return res.json({ started: true, sessionId: sId });
@@ -2035,6 +2049,127 @@ app.post('/api/parse-document', upload.single('file'), async (req, res): Promise
     return res.status(500).json({ error: `解析源文件失败: ${err.message}` });
   }
 });
+
+// Generic LLM call helper for planner and proofreader roles
+async function callLLM(
+  customApi: { apiKey?: string; baseUrl?: string; model?: string },
+  systemPrompt: string,
+  userPrompt: string,
+  temperature: number = 0.3
+): Promise<string | null> {
+  let useOfficialGoogleSdk = false;
+  if (customApi.apiKey && customApi.apiKey !== 'not-required') {
+    const bUrl = customApi.baseUrl || '';
+    const mdl = customApi.model || '';
+    if (!bUrl || bUrl.includes('googleapis.com') || bUrl.includes('google')) {
+      if (mdl.includes('gemini-')) useOfficialGoogleSdk = true;
+    }
+  }
+
+  if (useOfficialGoogleSdk) {
+    const ai = new GoogleGenAI({ apiKey: customApi.apiKey!, httpOptions: { headers: { 'User-Agent': 'aistudio-build' } } });
+    const response = await ai.models.generateContent({ model: customApi.model || 'gemini-2.5-flash', contents: userPrompt, config: { systemInstruction: systemPrompt, temperature } });
+    return response.text?.trim() || null;
+  }
+
+  if (customApi.apiKey && customApi.baseUrl) {
+    let rawUrl = customApi.baseUrl.trim().replace(/\/$/, '');
+    if (rawUrl.endsWith('/chat/completions')) rawUrl = rawUrl.slice(0, -17);
+    else if (rawUrl.endsWith('/chat')) rawUrl = rawUrl.slice(0, -5);
+
+    const bodyObj = {
+      model: customApi.model || 'gpt-3.5-turbo',
+      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
+      temperature,
+    };
+
+    const response = await fetch(`${rawUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(customApi.apiKey && customApi.apiKey !== 'not-required' ? { 'Authorization': `Bearer ${customApi.apiKey}` } : {}) },
+      body: JSON.stringify(bodyObj),
+    });
+
+    if (!response.ok) throw new Error(`LLM API error: ${response.status}`);
+    const result = await response.json();
+    return result.choices?.[0]?.message?.content?.trim() || null;
+  }
+
+  return null;
+}
+
+function plannerSystemPrompt(sourceLang: string, targetLang: string, tone: string, glossaryTerms?: { source: string; target: string }[]): string {
+  const glossarySection = glossaryTerms && glossaryTerms.length > 0
+    ? `\nExisting terminology mapping:\n${glossaryTerms.map(t => `  ${t.source} → ${t.target}`).join('\n')}`
+    : '';
+  return `You are a translation planning agent. Analyze the given text segments and output a concise translation strategy as JSON with keys: "strategy" (string: overall approach), "keyTerms" (array of {source, target} objects for critical terms), "notes" (string: any special handling instructions). Keep keyTerms to at most 10 most important items.${glossarySection}`;
+}
+
+async function plannerAnalyze(
+  texts: string[],
+  sourceLang: string,
+  targetLang: string,
+  tone: string,
+  customApi?: { apiKey?: string; baseUrl?: string; model?: string },
+  glossaryTerms?: { source: string; target: string }[]
+): Promise<{ strategy: string; keyTerms: { source: string; target: string }[]; notes: string }> {
+  const defaultResult = { strategy: 'direct', keyTerms: [], notes: '' };
+  if (!customApi || !customApi.baseUrl) return defaultResult;
+  
+  const systemPrompt = plannerSystemPrompt(sourceLang, targetLang, tone, glossaryTerms);
+  const userPrompt = `Analyze these ${texts.length} text segments for translation from ${sourceLang} to ${targetLang} (tone: ${tone}):\n${texts.slice(0, 20).map((t, i) => `${i + 1}. ${t}`).join('\n')}${texts.length > 20 ? `\n... and ${texts.length - 20} more segments` : ''}`;
+
+  try {
+    const result = await callLLM(customApi, systemPrompt, userPrompt, 0.2);
+    if (!result) return defaultResult;
+    const cleaned = result.replace(/^```[a-zA-Z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+    const parsed = JSON.parse(cleaned);
+    return {
+      strategy: String(parsed.strategy || 'direct'),
+      keyTerms: Array.isArray(parsed.keyTerms) ? parsed.keyTerms.slice(0, 10).map((t: any) => ({ source: String(t.source || ''), target: String(t.target || '') })).filter((t: any) => t.source && t.target) : [],
+      notes: String(parsed.notes || ''),
+    };
+  } catch (err) {
+    console.warn('[plannerAnalyze] Failed, using default strategy:', err);
+    return defaultResult;
+  }
+}
+
+async function proofreadBatch(
+  originalTexts: string[],
+  translatedTexts: string[],
+  sourceLang: string,
+  targetLang: string,
+  customApi?: { apiKey?: string; baseUrl?: string; model?: string },
+  glossaryTerms?: { source: string; target: string }[]
+): Promise<string[]> {
+  if (!customApi || !customApi.baseUrl) return translatedTexts;
+  
+  const glossarySection = glossaryTerms && glossaryTerms.length > 0
+    ? `\nTerminology requirements:\n${glossaryTerms.map(t => `  ${t.source} → ${t.target}`).join('\n')}`
+    : '';
+
+  const systemPrompt = `You are a professional translation proofreader. Review translated text segments and correct any errors. Rules:
+1. Fix translation inaccuracies, missing terms, or grammar errors
+2. Ensure terminology matches the specified mappings exactly — this is the HIGHEST priority
+3. If a translation is already correct, return it unchanged
+4. Output ONLY valid JSON: { "corrections": [string, string, ...] } — array must be exactly ${originalTexts.length} items${glossarySection}`;
+
+  const userPrompt = `Review these ${originalTexts.length} translation pairs:\n${originalTexts.slice(0, 30).map((src, i) => `[${i + 1}] Source: ${src}\n    Translation: ${translatedTexts[i]}`).join('\n')}${originalTexts.length > 30 ? `\n... and ${originalTexts.length - 30} more pairs` : ''}\n\nReturn a JSON object with key "corrections" containing an array of corrected translations (same length as input). If a translation is already correct, return it unchanged.`;
+
+  try {
+    const result = await callLLM(customApi, systemPrompt, userPrompt, 0.1);
+    if (!result) return translatedTexts;
+    const cleaned = result.replace(/^```[a-zA-Z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+    const parsed = JSON.parse(cleaned);
+    if (Array.isArray(parsed.corrections) && parsed.corrections.length === translatedTexts.length) {
+      return parsed.corrections.map((c: any, i: number) => String(c || translatedTexts[i]));
+    }
+    return translatedTexts;
+  } catch (err) {
+    console.warn('[proofreadBatch] Proofreading failed, returning original translations:', err);
+    return translatedTexts;
+  }
+}
 
 // Helper: Polishing a single paragraph translation according to style and targetLang
 async function polishTextSingle(
@@ -2209,10 +2344,40 @@ app.post('/api/translate-chunks', async (req, res): Promise<any> => {
  const polished = await polishTextSingle(originalText, currentTranslation || '', targetLang, tone, apiForRole(agentPlan, 'proofreader', customApi));
  return res.json({ success: true, translations: [polished] });
  } else {
- const translations = await translateTextBatch(texts, sourceLang, targetLang, tone, apiForRole(agentPlan, 'executor', customApi), false, glossaryTerms);
+ // Planner phase: if agent plan is enabled, analyze text for key terms
+ if (isAgentPlanEnabled(agentPlan)) {
+ const plannerApi = apiForRole(agentPlan, 'planner', customApi);
+ if (plannerApi?.baseUrl) {
+ try {
+ const planResult = await plannerAnalyze(texts, sourceLang, targetLang, tone, plannerApi, glossaryTerms);
+ // Merge planner's key terms into glossary for this translation
+ if (planResult.keyTerms.length > 0) {
+ glossaryTerms = [...(glossaryTerms || []), ...planResult.keyTerms];
+ console.log(`[planner] Strategy: ${planResult.strategy}; Added ${planResult.keyTerms.length} key terms`);
+ }
+ } catch (err: any) {
+ console.warn('[planner] Analysis failed, continuing with default strategy:', err.message);
+ }
+ }
+ }
+
+ let translations = await translateTextBatch(texts, sourceLang, targetLang, tone, apiForRole(agentPlan, 'executor', customApi), false, glossaryTerms);
+
+ // Proofreader phase: if agent plan is enabled, review and correct translations
+ if (isAgentPlanEnabled(agentPlan)) {
+ const proofreaderApi = apiForRole(agentPlan, 'proofreader', customApi);
+ if (proofreaderApi?.baseUrl) {
+ try {
+ translations = await proofreadBatch(texts, translations, sourceLang, targetLang, proofreaderApi, glossaryTerms);
+ } catch (err: any) {
+ console.warn('[proofreader] Batch proofreading failed:', err.message);
+ }
+ }
+ }
+
  return res.json({ success: true, translations });
  }
-  } catch (err: any) {
+ } catch (err: any) {
     console.error('Error translating or polishing chunks:', err);
     let msg = err.message || '翻译段落组出错';
     if (msg.includes('Quota exceeded') || msg.includes('quota') || msg.includes('429_RESOURCE_EXHAUSTED') || msg.includes('429')) {

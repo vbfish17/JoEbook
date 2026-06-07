@@ -3615,7 +3615,22 @@ setTermbaseNotice(currentLang === 'zh' ? `导入失败: ${err.message}` : `Impor
 <FileSpreadsheet className="w-5 h-5 mx-auto text-zinc-600 mb-1" />
 <p className="text-[10px] text-zinc-500">{currentLang === 'zh' ? '拖拽文件到此处导入 (JSON / CSV / TXT / TSV)' : 'Drop file here to import (JSON / CSV / TXT / TSV)'}</p>
 </div>
-              {termbaseNotice && <p className="text-[10px] text-emerald-400">{termbaseNotice}</p>}
+{/* Batch term comparison text input */}
+<div className="border border-dashed border-zinc-700 rounded-lg p-2">
+<p className="text-[10px] text-zinc-500 mb-1.5">{currentLang === 'zh' ? '批量输入术语对照（支持 source => target / source→target / CSV / Tab 格式，每行一条）' : 'Batch term comparison input (source => target / source→target / CSV / Tab, one per line)'}</p>
+<textarea
+value={termComparisonText}
+onChange={(e) => setTermComparisonText(e.target.value)}
+placeholder={currentLang === 'zh' ? '例如：\nAgent → 智能体\nRAG → 检索增强生成\nModel Routing → 模型路由' : 'e.g.:\nAgent → 智能体\nRAG → 检索增强生成\nModel Routing → 模型路由'}
+rows={3}
+className="w-full bg-zinc-950/80 border border-zinc-800 rounded-lg px-2 py-1.5 text-[10px] text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-emerald-600 resize-y font-mono"
+/>
+<button type="button" onClick={handleImportTermComparison} disabled={!termComparisonText.trim()} className="mt-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-[10px] font-semibold flex items-center gap-1.5">
+<Plus className="w-3 h-3" />
+{currentLang === 'zh' ? '导入术语对照' : 'Import Terms'}
+</button>
+</div>
+ {termbaseNotice && <p className="text-[10px] text-emerald-400">{termbaseNotice}</p>}
               {showTermbaseLibrary && (
                 <div className="border-t border-zinc-800 pt-3 space-y-2">
                   <input
