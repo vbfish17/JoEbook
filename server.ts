@@ -1743,10 +1743,10 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
  const originalName = file.originalname;
  const ext = path.extname(originalName).toLowerCase();
 
-  const parsedGlossary = parseJsonField<any[]>(req.body.glossaryTerms);
-  const glossaryTerms = Array.isArray(parsedGlossary) && parsedGlossary.length > 0
-    ? parsedGlossary.map((t: any) => ({ source: String(t.source), target: String(t.target) }))
-    : undefined;
+ const parsedGlossary = parseJsonField<any[]>(req.body.glossaryTerms);
+ let glossaryTerms = Array.isArray(parsedGlossary) && parsedGlossary.length > 0
+ ? parsedGlossary.map((t: any) => ({ source: String(t.source), target: String(t.target) }))
+ : undefined;
   const agentPlan = parseJsonField<AgentPlanPayload>(req.body.agentPlan);
   if (agentPlan?.summary) console.log('[agent orchestration]', agentPlan.summary);
 
@@ -1758,10 +1758,35 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
   
   updateProgress(10, `开始解析文档并初始化翻译引擎...`);
 
-  // Execute in background
-  Promise.resolve().then(async () => {
-    try {
+ // Execute in background
+ Promise.resolve().then(async () => {
+ try {
+ // Planner phase: lazily triggered on first batch (since document text is only available inside translateDocx/translateEpub/etc.)
+ let plannerExecuted = false;
  const translateRunner = async (textBatch: string[]): Promise<string[]> => {
+ // Lazy planner: analyze the first batch of text to extract key terms
+ if (!plannerExecuted && isAgentPlanEnabled(agentPlan)) {
+ plannerExecuted = true;
+ const plannerApi = apiForRole(agentPlan, 'planner', customApi);
+ if (plannerApi?.baseUrl) {
+ try {
+ updateProgress(12, '规划智能体分析文档结构与关键术语...');
+ const planResult = await plannerAnalyze(textBatch, sourceLang, targetLang, tone, plannerApi, glossaryTerms);
+ if (planResult.keyTerms.length > 0) {
+ glossaryTerms = [...(glossaryTerms || []), ...planResult.keyTerms];
+ console.log(`[planner] Strategy: ${planResult.strategy}; Added ${planResult.keyTerms.length} key terms`);
+ updateProgress(15, `规划完成: ${planResult.strategy}; 提取 ${planResult.keyTerms.length} 个关键术语`);
+ } else {
+ console.log(`[planner] Strategy: ${planResult.strategy}; No additional key terms`);
+ updateProgress(15, `规划完成: ${planResult.strategy}`);
+ }
+ } catch (err: any) {
+ console.warn('[planner] Analysis failed, continuing with default strategy:', err.message);
+ updateProgress(15, '规划智能体分析失败，使用默认策略继续...');
+ }
+ }
+ }
+
  let translated = await translateTextBatch(textBatch, sourceLang, targetLang, tone, apiForRole(agentPlan, 'executor', customApi), false, glossaryTerms);
  // Proofreader phase: if agent plan is enabled and proofreader API is configured
  if (isAgentPlanEnabled(agentPlan)) {
