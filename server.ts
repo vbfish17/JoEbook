@@ -900,61 +900,10 @@ CRITICAL RULES:
         }
         return applyTerminologyMemoryBatch(texts, glossaryTerms);
       }, customApi);
-    } else {
-      // Default Gemini API configuration using @google/genai SDK
-      if (!process.env.GEMINI_API_KEY) {
-        throw new Error("内置公用 Gemini API Key 未配置。请点击右上角【设置 (⚙ Settings)】，开启【启用第三方自建接口】，在模型预设中选中【Gemini (Google Official)】并妥善填入您個人的 Pro 或 Free Key，即可百分百成功运行并获得高质量排版文档！");
-      }
-      
-      results = await retryWithBackoff(async () => {
-        const ai = new GoogleGenAI({
-          apiKey: process.env.GEMINI_API_KEY!,
-          httpOptions: {
-            headers: {
-              'User-Agent': 'aistudio-build',
-            }
-          }
-        });
-
-        const prompt = `Translate the following text segments. Input array: ${JSON.stringify(texts)}`;
-        
-        const response = await ai.models.generateContent({
-          model: "gemini-3.5-flash",
-          contents: prompt,
-          config: {
-            systemInstruction: finalSystemInstruction,
-            temperature: 0.3,
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                translations: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.STRING
-                  }
-                }
-              },
-              required: ["translations"]
-            }
-          }
-        });
-        
-        if (!response.text) return texts;
-        const cleanJson = response.text.trim();
-        const data = JSON.parse(cleanJson);
-        if (Array.isArray(data)) return applyTerminologyMemoryBatch(data.map((v: any) => String(v)), glossaryTerms);
-        if (data && typeof data === 'object') {
-          if (Array.isArray(data.translations)) return applyTerminologyMemoryBatch(data.translations.map((v: any) => String(v)), glossaryTerms);
-          if (Array.isArray(data.translated)) return applyTerminologyMemoryBatch(data.translated.map((v: any) => String(v)), glossaryTerms);
-          if (Array.isArray(data.paragraphs)) return applyTerminologyMemoryBatch(data.paragraphs.map((v: any) => String(v)), glossaryTerms);
-          if (Array.isArray(data.results)) return applyTerminologyMemoryBatch(data.results.map((v: any) => String(v)), glossaryTerms);
-          const foundArray = Object.values(data).find(v => Array.isArray(v)) as any[] | undefined;
-          if (foundArray) return applyTerminologyMemoryBatch(foundArray.map((v: any) => String(v)), glossaryTerms);
-        }
-        return applyTerminologyMemoryBatch(texts, glossaryTerms);
-      }, customApi);
-    }
+ } else {
+ // Gemini default API removed — custom API configuration is required
+ throw new Error("请先配置翻译模型接口。点击右上角【设置 (⚙ Settings)】，开启【启用第三方自建接口】，选择模型预设（如 DeepSeek / OpenAI / Ollama / LM Studio 等）并填入 API 地址与密钥，即可开始翻译。");
+ }
   } catch (err: any) {
     const errMsg = err?.message || String(err);
     const isFatal = 
@@ -1899,7 +1848,7 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
  console.error(`Error during background translation handling:`, err);
  let errorMsg = err.message || 'Unknown translation error';
  if (errorMsg.includes('403') || errorMsg.includes('PERMISSION_DENIED') || errorMsg.includes('denied access')) {
- errorMsg = '【引擎访问限制 / 403 PERMISSION_DENIED】检测到内置公用 Gemini 接口受到开发沙盒网络/权限限制暂不可用。JoEbook 已为您集成本地/第三方大模型免密与配置机制：请点击页面右上角【设置 (齿轮) 按钮】，启用【第三方及自建模型】，切换使用您自己的 API 密钥 (我们为您预设了 Gemini 2.5 Official, DeepSeek, OpenAI, Ollama 快捷填表模板)，即可 100% 成功启动完美排版翻译！\n\n[Platform Info] Standard backend sandbox denied access (403). Please click the Settings icon in the top right, turn on the custom LLM integration toggle, and enter your own API Key using the Gemini 2.5 or DeepSeek/OpenAI autocomplete presets to enjoy high-speed layout-preserving document translation!';
+ errorMsg = '【引擎访问限制 / 403 PERMISSION_DENIED】翻译模型接口返回权限拒绝错误。请检查 API Key 是否有效、是否有余额。点击页面右上角【设置 (齿轮) 按钮】，确认【第三方及自建模型】配置正确。\\n\\n[Platform Info] API returned 403 PERMISSION_DENIED. Please verify your API Key and check the Settings panel for correct model configuration.';
  }
  if (errorMsg.includes('LLM API error') || errorMsg.includes('ECONNREFUSED') || errorMsg.includes('fetch failed')) {
  errorMsg = `【模型接口连接失败】${errorMsg}\n\n请检查 API Base URL 和 Model 是否正确配置。如启用了智能体编排，请确认各角色模型档案已正确设置。`;
@@ -2181,19 +2130,49 @@ async function proofreadBatch(
 
   const userPrompt = `Review these ${originalTexts.length} translation pairs:\n${originalTexts.slice(0, 30).map((src, i) => `[${i + 1}] Source: ${src}\n    Translation: ${translatedTexts[i]}`).join('\n')}${originalTexts.length > 30 ? `\n... and ${originalTexts.length - 30} more pairs` : ''}\n\nReturn a JSON object with key "corrections" containing an array of corrected translations (same length as input). If a translation is already correct, return it unchanged.`;
 
-  try {
-    const result = await callLLM(customApi, systemPrompt, userPrompt, 0.1);
-    if (!result) return translatedTexts;
-    const cleaned = result.replace(/^```[a-zA-Z]*\n?/i, '').replace(/\n?```$/i, '').trim();
-    const parsed = JSON.parse(cleaned);
-    if (Array.isArray(parsed.corrections) && parsed.corrections.length === translatedTexts.length) {
-      return parsed.corrections.map((c: any, i: number) => String(c || translatedTexts[i]));
-    }
-    return translatedTexts;
-  } catch (err) {
-    console.warn('[proofreadBatch] Proofreading failed, returning original translations:', err);
-    return translatedTexts;
-  }
+ try {
+ const result = await callLLM(customApi, systemPrompt, userPrompt, 0.1);
+ if (!result) return translatedTexts;
+ const cleaned = result.replace(/^```[a-zA-Z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+ 
+ // Try JSON parse first
+ try {
+ const parsed = JSON.parse(cleaned);
+ if (Array.isArray(parsed.corrections) && parsed.corrections.length === translatedTexts.length) {
+ return parsed.corrections.map((c: any, i: number) => String(c || translatedTexts[i]));
+ }
+ // Partial array match
+ if (Array.isArray(parsed.corrections) && parsed.corrections.length > 0) {
+ return translatedTexts.map((orig, i) => {
+ const c = parsed.corrections[i];
+ if (c && typeof c === 'string' && c.trim()) return c;
+ return orig;
+ });
+ }
+ } catch (jsonErr) {
+ // JSON parse failed — model may have returned non-JSON format
+ console.warn('[proofreadBatch] JSON parse failed, attempting regex extraction');
+ }
+ 
+ // Fallback: try to extract translations from numbered format like [1] Source: ... Translation: ...
+ const translationPattern = /Translation:\s*([^\[]*?)(?=\s*\[\d+\]\s*Source:|\s*$)/gi;
+ const extracted: string[] = [];
+ let match;
+ while ((match = translationPattern.exec(cleaned)) !== null) {
+ const t = match[1].trim();
+ if (t) extracted.push(t);
+ }
+ if (extracted.length === translatedTexts.length) {
+ console.log('[proofreadBatch] Extracted translations from numbered format');
+ return extracted;
+ }
+ 
+ // Last fallback: return original translations
+ return translatedTexts;
+ } catch (err) {
+ console.warn('[proofreadBatch] Proofreading failed, returning original translations:', err);
+ return translatedTexts;
+ }
 }
 
 // Helper: Polishing a single paragraph translation according to style and targetLang
@@ -2298,39 +2277,10 @@ Do NOT output anything other than the polished translation. No markdown codebloc
       }
       return content;
     }, customApi);
-  } else {
-    // Default Gemini API calling
-    if (!process.env.GEMINI_API_KEY) {
-      throw new Error("内置 Gemini API Key 未配置。请通过 右上角设置 按钮启用您的“第三方及自建模型”配置自填 API Key。");
-    }
-    
-    return await retryWithBackoff(async () => {
-      const ai = new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY!,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build',
-          }
-        }
-      });
-
-      const response = await ai.models.generateContent({
- model: "gemini-3.5-flash",
- contents: prompt,
- config: {
- systemInstruction: systemInstruction,
- temperature: 0.3,
+ } else {
+ // Gemini default API removed — custom API configuration is required
+ throw new Error("请先配置翻译模型接口。点击右上角【设置 (⚙ Settings)】，开启【启用第三方自建接口】，选择模型预设并填入 API 地址与密钥。");
  }
-      });
-
-      let resultText = response.text?.trim() || currentTranslation;
-      resultText = resultText.replace(/^```[a-zA-Z]*\n?/i, '').replace(/\n?```$/i, '').trim();
-      if (resultText.startsWith('"') && resultText.endsWith('"')) {
-        resultText = resultText.slice(1, -1).trim();
-      }
-      return resultText;
-    }, customApi);
-  }
 }
 
 // Interactive: Translate arbitrary string list with API variables
@@ -2406,7 +2356,7 @@ app.post('/api/translate-chunks', async (req, res): Promise<any> => {
     console.error('Error translating or polishing chunks:', err);
     let msg = err.message || '翻译段落组出错';
     if (msg.includes('Quota exceeded') || msg.includes('quota') || msg.includes('429_RESOURCE_EXHAUSTED') || msg.includes('429')) {
-      msg = "【API 限流 / Quota Exceeded】内置公共 Gemini 大模型测试接口今日配额已用完导致 429 错误。JoEbook 极速排版引擎支持填入自备密钥：请点击页面右上角 ⚙ 设置 按钮，开启“第三方及自建模型”，切换为您本人的 API 密钥 (Gemini / DeepSeek / OpenAI 等) 首日无上限、零阻碍高速排版完成翻译！";
+      msg = "【API 限流 / Quota Exceeded】翻译模型接口触发限流 (429)。请稍等后重试，或切换其他模型/提供商。点击页面右上角 ⚙ 设置 按钮，可更换 API 密钥或模型配置。";
     }
     return res.status(500).json({ error: msg });
   }
@@ -2822,6 +2772,135 @@ echo "=========================================================="`;
   } catch (err: any) {
     console.error('Error creating macOS DMG packager ZIP:', err);
     return res.status(500).json({ error: `无法创建打包二进制包: ${err.message}` });
+  }
+});
+
+// ── Multi-Agent Orchestrator API Endpoints ─────────────────────────
+// These endpoints bridge the frontend's ModelProfile system to the
+// server-side TranslationOrchestrator. Role model configs come from
+// the frontend's resolveAgentRoleApis() — NOT hardcoded.
+
+// In-memory orchestrator instances (keyed by documentId)
+const orchestratorSessions: Record<string, any> = {};
+
+// POST /api/orchestrator/run — Start a multi-agent pipeline run
+app.post('/api/orchestrator/run', express.json(), async (req: any, res: any) => {
+  try {
+    const { documentId, fileName, fileType, blocks, sourceLang, targetLang, domain, roleModels, glossaryTerms } = req.body;
+
+    if (!documentId || !blocks || !Array.isArray(blocks) || blocks.length === 0) {
+      return res.status(400).json({ error: 'Missing required fields: documentId, blocks' });
+    }
+
+    // Dynamically import orchestrator (ESM boundary)
+    const { TranslationOrchestrator } = await import('./src/orchestrator/translation-orchestrator.js');
+
+    const docAST = {
+      documentId,
+      fileName: fileName || 'document',
+      fileType: fileType || 'docx',
+      sourceLang: sourceLang || 'Auto',
+      targetLang: targetLang || 'Chinese (Simplified)',
+      domain: domain || 'general',
+      blocks: blocks.map((b: any, i: number) => ({
+        blockId: b.blockId || `block-${i}`,
+        text: b.text || '',
+        nodeType: b.nodeType || 'paragraph',
+        constraint: b.constraint,
+        bbox: b.bbox,
+        style: b.style,
+        domPath: b.domPath || `body/p[${i}]`,
+        pageIndex: b.pageIndex,
+      })),
+    };
+
+    const roleModelConfig = roleModels || {
+      planner: { baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5:7b' },
+      executor: { baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5:7b' },
+      proofreader: { baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5:7b' },
+    };
+
+    const existingGlossary = glossaryTerms || [];
+
+    const orchestrator = new TranslationOrchestrator(undefined, {
+      onProgress: (completed, total, phase) => {
+        if (orchestratorSessions[documentId]) {
+          orchestratorSessions[documentId].status = `阶段: ${phase} (${completed}/${total} 块)`;
+          orchestratorSessions[documentId].progress = Math.round((completed / Math.max(total, 1)) * 100);
+        }
+      },
+    });
+
+    orchestratorSessions[documentId] = {
+      status: '初始化编排器...',
+      progress: 0,
+      phase: 'planning',
+    };
+
+    // Run async — return immediately, client polls progress
+    const runPromise = orchestrator.run(docAST, roleModelConfig, existingGlossary);
+    runPromise.then(result => {
+      orchestratorSessions[documentId].result = result;
+      orchestratorSessions[documentId].status = result.success ? '翻译流水线完成' : `失败: ${result.error}`;
+      orchestratorSessions[documentId].progress = 100;
+      orchestratorSessions[documentId].phase = result.success ? 'completed' : 'failed';
+    }).catch((err: any) => {
+      orchestratorSessions[documentId].status = `编排器错误: ${err?.message || String(err)}`;
+      orchestratorSessions[documentId].progress = -1;
+      orchestratorSessions[documentId].phase = 'failed';
+    });
+
+    return res.json({ started: true, documentId });
+  } catch (err: any) {
+    console.error('[orchestrator/run] Error:', err);
+    return res.status(500).json({ error: `编排器启动失败: ${err?.message || String(err)}` });
+  }
+});
+
+// GET /api/orchestrator/progress/:documentId — Poll pipeline progress
+app.get('/api/orchestrator/progress/:documentId', (req: any, res: any) => {
+  const session = orchestratorSessions[req.params.documentId];
+  if (!session) {
+    return res.json({ status: '未找到任务', progress: 0, phase: 'planning' });
+  }
+  return res.json(session);
+});
+
+// POST /api/orchestrator/polish — Interactive polish via proofreader agent
+app.post('/api/orchestrator/polish', express.json(), async (req: any, res: any) => {
+  try {
+    const { blockId, originalText, translatedText, constraint, action, plan, roleModels, context } = req.body;
+
+    if (!blockId || !translatedText || !action || !plan) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const { TranslationOrchestrator } = await import('./src/orchestrator/translation-orchestrator.js');
+    const roleModelConfig = roleModels || {
+      proofreader: { baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5:7b' },
+    };
+
+    const orchestrator = new TranslationOrchestrator();
+    const polishedText = await orchestrator.polishBlock(
+      {
+        blockId,
+        originalText: originalText || '',
+        translatedText,
+        preservedTags: [],
+        confidence: 0.5,
+        domPath: '',
+        constraint: constraint || 'ExpandAllowed',
+      },
+      action,
+      plan,
+      roleModelConfig.proofreader || {},
+      context,
+    );
+
+    return res.json({ success: true, polishedText });
+  } catch (err: any) {
+    console.error('[orchestrator/polish] Error:', err);
+    return res.status(500).json({ error: `润色失败: ${err?.message || String(err)}` });
   }
 });
 

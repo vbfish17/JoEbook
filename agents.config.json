@@ -1,0 +1,40 @@
+{
+  "_comment": "Default fallback config (v2.0) — overridden at runtime by frontend ModelProfile selections via agentRoleProfileIds. Do NOT hardcode API keys here.",
+  "executorPool": {
+    "maxConcurrency": 2,
+    "batchSize": 20
+  },
+  "proofreading": {
+    "autoRetryOnHighSeverity": true,
+    "maxRetries": 2,
+    "semanticSimilarityThreshold": 0.75
+  },
+  "timeouts": {
+    "planner": 60000,
+    "executor": 60000,
+    "reviewer": 60000
+  },
+  "defaults": {
+    "planner": {
+      "adapter": "ollama",
+      "baseUrl": "http://localhost:11434/v1",
+      "model": "qwen2.5:7b",
+      "temperature": 0.2,
+      "maxTokens": 8192
+    },
+    "executor": {
+      "adapter": "openai-compatible",
+      "baseUrl": "http://127.0.0.1:1234/v1",
+      "model": "mlx-community/translategemma-4b-it-4bit_immersive-translate",
+      "temperature": 0.3,
+      "maxTokens": 4096
+    },
+    "proofreader": {
+      "adapter": "ollama",
+      "baseUrl": "http://localhost:11434/v1",
+      "model": "qwen2.5:7b",
+      "temperature": 0.15,
+      "maxTokens": 4096
+    }
+  }
+}
