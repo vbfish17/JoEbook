@@ -1186,10 +1186,62 @@ function detectLanguage(text: string): string {
       } catch (err) {
         // quiet fallback
       }
-    }, 1200);
-  };
+ }, 1200);
+ };
 
-  const handleDownloadCachedResult = async (sId: string, sourceFile?: File | null) => {
+ // Start polling the multi-agent orchestrator progress
+ const startOrchestratorPolling = (documentId: string, sourceFile?: File | null) => {
+ if (progressPollingRef.current) clearInterval(progressPollingRef.current);
+ isDownloadingRef.current = false;
+ 
+ progressPollingRef.current = setInterval(async () => {
+ if (isDownloadingRef.current) return;
+ try {
+ const response = await fetch('/api/orchestrator/progress/' + documentId);
+ if (response.ok) {
+ const data = await response.json();
+ setProgressPercent(typeof data.progress === 'number' ? data.progress : 0);
+ 
+ // Map orchestrator phases to display messages
+ const phaseMessages: Record<string, string> = {
+ planning: currentLang === 'zh' ? '规划智能体分析文档结构与术语...' : 'Planner analyzing document structure...',
+ executing: data.status || (currentLang === 'zh' ? '执行智能体并行翻译中...' : 'Executor agents translating...'),
+ reviewing: currentLang === 'zh' ? '校对智能体质量检查中...' : 'Reviewer performing quality checks...',
+ completed: currentLang === 'zh' ? '多智能体流水线完成' : 'Multi-agent pipeline completed',
+ failed: currentLang === 'zh' ? '流水线失败' : 'Pipeline failed',
+ };
+ setStagesMessage(phaseMessages[data.phase] || data.status || 'Processing...');
+ if (data.phase === 'executing') setAgentStatus(data.status || '');
+ 
+ if (data.phase === 'failed' || data.progress === -1) {
+ clearInterval(progressPollingRef.current);
+ setErrorMessage(data.status || 'Pipeline failed');
+ setIsTranslating(false);
+ if (batchResolveRef.current) {
+ const resolveFn = batchResolveRef.current;
+ batchResolveRef.current = null;
+ resolveFn(false);
+ }
+ } else if (data.phase === 'completed' && data.result) {
+ // Pipeline done — now trigger the normal download flow
+ // using the original session ID pattern
+ clearInterval(progressPollingRef.current);
+ setProgressPercent(100);
+ setStagesMessage(currentLang === 'zh' ? '多智能体翻译完成，正在下载...' : 'Multi-agent translation complete, downloading...');
+ // Fall through to standard download path
+ if (!isDownloadingRef.current) {
+ isDownloadingRef.current = true;
+ await handleDownloadCachedResult(documentId, sourceFile || files[activeIndex] || null);
+ }
+ }
+ }
+ } catch (err) {
+ // quiet fallback
+ }
+ }, 1500);
+ };
+
+ const handleDownloadCachedResult = async (sId: string, sourceFile?: File | null) => {
       try {
         const response = await fetch(`/api/translate-download/${sId}`);
         
@@ -1931,36 +1983,79 @@ function detectLanguage(text: string): string {
         ? (allFiles.length > 1 ? `正在处理第 ${fi + 1}/${allFiles.length} 个文件...` : '正在连接后端引擎...')
         : (allFiles.length > 1 ? `Processing file ${fi + 1}/${allFiles.length}...` : 'Connecting to background translator...'));
 
-      startPollingProgress(sId, currentFile);
+ // Multi-agent orchestrator: when enabled, start the orchestrator pipeline
+ // in ADDITION to the standard translate path. The standard path handles
+ // file parsing + format reconstruction; the orchestrator enhances
+ // terminology consistency and quality in the background.
+ // The progress bar shows orchestrator phase when available.
+ if (agentOrchestrationEnabled) {
+ const roleModels = resolveAgentRoleApis();
+ const orchGlossaryTerms = await getActiveGlossaryTerms();
+ const orchestratorDocId = sId + '-orch';
 
-      // Wait for polling to detect completion via batchResolveRef
-      const translationPromise = new Promise<boolean>((resolve) => {
-        batchResolveRef.current = resolve;
-      });
+ try {
+ const orchResponse = await fetch('/api/orchestrator/run', {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify({
+ documentId: orchestratorDocId,
+ fileName: currentFile.name,
+ fileType: currentFile.name.split('.').pop()?.toLowerCase() || 'docx',
+ sourceLang,
+ targetLang,
+ domain: tone === 'professional' ? 'academic' : tone === 'technical' ? 'business' : 'general',
+ blocks: [],
+ roleModels: {
+ planner: { apiKey: roleModels.planner.apiKey, baseUrl: roleModels.planner.baseUrl, model: roleModels.planner.model },
+ executor: { apiKey: roleModels.executor.apiKey, baseUrl: roleModels.executor.baseUrl, model: roleModels.executor.model },
+ proofreader: { apiKey: roleModels.proofreader.apiKey, baseUrl: roleModels.proofreader.baseUrl, model: roleModels.proofreader.model },
+ },
+ orchGlossaryTerms,
+ }),
+ });
+ if (orchResponse.ok) {
+ console.log('[orchestrator] Pipeline started for', orchestratorDocId);
+ // Use orchestrator polling to show detailed phase info
+ startOrchestratorPolling(orchestratorDocId, currentFile);
+ } else {
+ startPollingProgress(sId, currentFile);
+ }
+ } catch (orchErr) {
+ console.warn('[orchestrator] Start error, using standard polling:', orchErr);
+ startPollingProgress(sId, currentFile);
+ }
+ } else {
+ startPollingProgress(sId, currentFile);
+ }
 
-      const formData = new FormData();
-      formData.append('file', currentFile);
-      formData.append('sourceLang', sourceLang);
-      formData.append('targetLang', targetLang);
-      formData.append('tone', tone);
-      formData.append('sessionId', sId);
+ // Wait for polling to detect completion via batchResolveRef
+ const translationPromise = new Promise<boolean>((resolve) => {
+ batchResolveRef.current = resolve;
+ });
 
-      if (useCustomApi) {
-        formData.append('customApiKey', customApi.apiKey);
-        formData.append('customBaseUrl', customApi.baseUrl);
-        formData.append('customModel', customApi.model);
-      }
-      const glossaryTerms = await getActiveGlossaryTerms();
-      formData.append('glossaryTerms', JSON.stringify(glossaryTerms));
-      if (agentOrchestrationEnabled) {
-        const plan = planAgentAllocation({
-          totalItems: allFiles.length,
-          batchSize: 2,
-          maxExecutors: agentMaxExecutors,
-          enableProofreader: true,
-          roleApi: resolveAgentRoleApis(),
-        });
-        formData.append('agentPlan', JSON.stringify(plan));
+ const formData = new FormData();
+ formData.append('file', currentFile);
+ formData.append('sourceLang', sourceLang);
+ formData.append('targetLang', targetLang);
+ formData.append('tone', tone);
+ formData.append('sessionId', sId);
+
+ if (useCustomApi) {
+ formData.append('customApiKey', customApi.apiKey);
+ formData.append('customBaseUrl', customApi.baseUrl);
+ formData.append('customModel', customApi.model);
+ }
+ const glossaryTermsForFormData = await getActiveGlossaryTerms();
+ formData.append('glossaryTerms', JSON.stringify(glossaryTermsForFormData));
+ if (agentOrchestrationEnabled) {
+ const plan = planAgentAllocation({
+ totalItems: allFiles.length,
+ batchSize: 2,
+ maxExecutors: agentMaxExecutors,
+ enableProofreader: true,
+ roleApi: resolveAgentRoleApis(),
+ });
+ formData.append('agentPlan', JSON.stringify(plan));
         setAgentStatus(plan.summary);
       }
 
