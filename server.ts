@@ -2819,7 +2819,7 @@ setInterval(cleanupOrchestratorSessions, 5 * 60 * 1000);
 // POST /api/orchestrator/run — Start a multi-agent pipeline run
 app.post('/api/orchestrator/run', express.json(), async (req: any, res: any) => {
   try {
-    const { documentId, fileName, fileType, blocks, sourceLang, targetLang, domain, roleModels, glossaryTerms } = req.body;
+    const { documentId, fileName, fileType, blocks, sourceLang, targetLang, domain, roleModels, glossaryTerms, fileBuffer } = req.body;
 
     if (!documentId || !blocks || !Array.isArray(blocks) || blocks.length === 0) {
       return res.status(400).json({ error: 'Missing required fields: documentId, blocks' });
@@ -2861,6 +2861,16 @@ app.post('/api/orchestrator/run', express.json(), async (req: any, res: any) => 
 
     const existingGlossary = glossaryTerms || [];
 
+    // Decode file buffer if provided (needed for file reconstruction after pipeline)
+    let fileBufferBuf: Buffer | null = null;
+    if (fileBuffer) {
+      try {
+        fileBufferBuf = Buffer.from(fileBuffer, 'base64');
+      } catch (e) {
+        console.warn('[orchestrator] Failed to decode fileBuffer:', e);
+      }
+    }
+
     const orchestrator = new TranslationOrchestrator(undefined, {
       onProgress: (completed, total, phase) => {
         if (orchestratorSessions[documentId]) {
@@ -2877,13 +2887,58 @@ app.post('/api/orchestrator/run', express.json(), async (req: any, res: any) => 
       _createdAt: Date.now(),
     };
 
+    // Store file metadata for later reconstruction
+    const fileMeta = fileBufferBuf ? {
+      fileName,
+      fileType,
+      sourceLang,
+      targetLang,
+      tone: req.body.tone || 'general',
+      fileBuffer: fileBufferBuf,
+    } : null;
+    if (fileMeta) {
+      (orchestratorSessions[documentId] as any).fileMeta = fileMeta;
+    }
+
     // Run async — return immediately, client polls progress
     const runPromise = orchestrator.run(docAST, roleModelConfig, existingGlossary);
-    runPromise.then(result => {
+    runPromise.then(async result => {
       orchestratorSessions[documentId].result = result;
       orchestratorSessions[documentId].status = result.success ? '翻译流水线完成' : `失败: ${result.error}`;
       orchestratorSessions[documentId].progress = 100;
       orchestratorSessions[documentId].phase = result.success ? 'completed' : 'failed';
+
+      // After successful pipeline, reconstruct the translated file and store in translationCaches
+      if (result.success && result.taskState && fileMeta) {
+        try {
+          const { getTaskState } = await import('./src/orchestrator/task-state.js');
+          const taskState = await getTaskState(documentId);
+          if (taskState && taskState.translatedBlocks && taskState.translatedBlocks.length > 0) {
+            console.log('[orchestrator] Reconstructing file from', taskState.translatedBlocks.length, 'translated blocks...');
+            const reconstructed = await reconstructFileFromBlocks(
+              fileMeta.fileBuffer,
+              fileMeta.fileName,
+              fileMeta.fileType,
+              fileMeta.sourceLang,
+              fileMeta.targetLang,
+              fileMeta.tone,
+              taskState.translatedBlocks,
+            );
+            if (reconstructed) {
+              translationCaches[documentId] = {
+                buffer: reconstructed.buffer,
+                outputName: reconstructed.outputName,
+                mimeType: reconstructed.mimeType,
+                isJson: false,
+                cleanupScheduled: false,
+              };
+              console.log('[orchestrator] File reconstructed and cached for download:', reconstructed.outputName);
+            }
+          }
+        } catch (reconErr: any) {
+          console.error('[orchestrator] File reconstruction failed:', reconErr.message);
+        }
+      }
     }).catch((err: any) => {
       orchestratorSessions[documentId].status = `编排器错误: ${err?.message || String(err)}`;
       orchestratorSessions[documentId].progress = -1;
@@ -2976,3 +3031,75 @@ const startExpress = async () => {
 };
 
 startExpress();
+
+/**
+ * Reconstruct a translated file from orchestrator-produced translated blocks.
+ * Uses the same translator functions as the standard path, but injects
+ * pre-translated text from the orchestrator pipeline instead of calling LLM.
+ */
+async function reconstructFileFromBlocks(
+  fileBuffer: Buffer,
+  fileName: string,
+  fileType: string,
+  sourceLang: string,
+  targetLang: string,
+  tone: string,
+  translatedBlocks: Array<{ blockId: string; originalText: string; translatedText: string; preservedTags?: string[]; domPath?: string }>,
+): Promise<{ buffer: Buffer; outputName: string; mimeType: string } | null> {
+  try {
+    const ext = '.' + (fileType || fileName.split('.').pop()?.toLowerCase());
+    const originalName = fileName;
+    const baseName = originalName.replace(/\.[^.]+$/, '');
+    const outputName = `${baseName}_${targetLang}.${fileType}`;
+
+    // Build a block lookup map: originalText → translatedText
+    const blockMap = new Map<string, string>();
+    for (const tb of translatedBlocks) {
+      blockMap.set(tb.originalText.trim(), tb.translatedText);
+    }
+
+    // Create a translateRunner that uses pre-translated blocks instead of calling LLM
+    const translateRunner = async (texts: string[]): Promise<string[]> => {
+      const results: string[] = [];
+      for (const text of texts) {
+        const trimmed = text.trim();
+        const translated = blockMap.get(trimmed);
+        if (translated) {
+          results.push(translated);
+        } else {
+          // Fallback: use original text (shouldn't happen if pipeline completed)
+          console.warn('[reconstruct] No translation found for block, using original');
+          results.push(text);
+        }
+      }
+      return results;
+    };
+
+    const progress = (_msg: string) => {}; // no-op
+
+    let outputBuffer: Buffer;
+    let mimeType: string;
+
+    if (ext === '.docx') {
+      mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      outputBuffer = await translateDocx(fileBuffer, translateRunner, progress, undefined, undefined);
+    } else if (ext === '.pptx') {
+      mimeType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+      outputBuffer = await translatePptx(fileBuffer, translateRunner, progress, undefined, undefined);
+    } else if (ext === '.epub') {
+      mimeType = 'application/epub+zip';
+      outputBuffer = await translateEpub(fileBuffer, translateRunner, progress, undefined, undefined);
+    } else if (ext === '.md') {
+      mimeType = 'text/markdown';
+      outputBuffer = await translateMarkdown(fileBuffer, translateRunner, progress, undefined, undefined);
+    } else {
+      console.warn('[reconstruct] Unsupported format:', ext);
+      return null;
+    }
+
+    return { buffer: outputBuffer, outputName, mimeType };
+  } catch (err: any) {
+    console.error('[reconstruct] File reconstruction error:', err.message);
+    return null;
+  }
+}

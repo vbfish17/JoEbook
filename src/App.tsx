@@ -2013,6 +2013,7 @@ function detectLanguage(text: string): string {
  sourceLang,
  targetLang,
  domain: tone === 'professional' ? 'academic' : tone === 'technical' ? 'business' : 'general',
+ tone,
  blocks: orchBlocks,
  roleModels: {
  planner: { apiKey: roleModels.planner.apiKey, baseUrl: roleModels.planner.baseUrl, model: roleModels.planner.model },
@@ -2020,6 +2021,8 @@ function detectLanguage(text: string): string {
  proofreader: { apiKey: roleModels.proofreader.apiKey, baseUrl: roleModels.proofreader.baseUrl, model: roleModels.proofreader.model },
  },
  glossaryTerms: orchGlossaryTerms,
+ // Send file as base64 so orchestrator can reconstruct translated file after pipeline
+ fileBuffer: await blobToBase64(currentFile),
  }),
  });
  if (orchResponse.ok) {
