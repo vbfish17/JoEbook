@@ -17,6 +17,12 @@ import type {
 
 const DEFAULT_SYSTEM_PROMPT = `You are an expert constraint-aware translator. Translate the given text block following the glossary, style guide, and constraint rules exactly. Return ONLY valid JSON with: {translatedText, preservedTags, confidence}.`;
 
+/** Prompt for dedicated translation models (e.g., TranslateGemma) that cannot handle JSON output. */
+const DEDICATED_TRANSLATOR_SYSTEM_PROMPT = `You are a professional translator. Translate the user-provided text directly into the target language. Output ONLY the translation, nothing else.`;
+
+/** Model name patterns that indicate a dedicated translation model needing simplified prompts. */
+const DEDICATED_TRANSLATOR_PATTERNS = ['translategemma', 'translation-', 'nllb', 'm2m100', 'seamless'];
+
 // Regex patterns for extracting preserved tags
 const HTML_TAG_RE = /<\/?[a-zA-Z][a-zA-Z0-9]*(?:\s+[^>]*)?\/?>/g;
 const JO_ID_RE = /<span\s+data-jo-id="[^"]*"[^>]*>.*?<\/span>/g;
@@ -24,8 +30,13 @@ const MARKDOWN_FORMAT_RE = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[([^\]]+)\]\([^)]+
 const MATH_MARKER_RE = /\{\$[^$]+\$?\}|\{\{[^}]+\}\}/g;
 
 export class ExecutorAgent extends BaseAgent {
+  private isDedicatedTranslator: boolean;
+
   constructor(modelConfig: AgentModelConfig, systemPrompt?: string) {
-    super('executor', modelConfig, systemPrompt || DEFAULT_SYSTEM_PROMPT);
+    const modelName = (modelConfig.model || '').toLowerCase();
+    const dedicated = DEDICATED_TRANSLATOR_PATTERNS.some(p => modelName.includes(p));
+    super('executor', modelConfig, systemPrompt || (dedicated ? DEDICATED_TRANSLATOR_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT));
+    this.isDedicatedTranslator = dedicated;
   }
 
   /**
@@ -55,7 +66,9 @@ export class ExecutorAgent extends BaseAgent {
       ? `Previous blocks for context:\n${previousBlocks.map((pb, i) => `[${i + 1}] Original: ${pb.original.substring(0, 150)}\n    Translated: ${pb.translated.substring(0, 150)}`).join('\n\n')}`
       : 'This is the first block. No prior context available.';
 
-    const userPrompt = `Source language: ${sourceLang || 'auto'}
+    const userPrompt = this.isDedicatedTranslator
+    ? `Translate the following text from ${sourceLang || 'English'} to ${targetLang || 'Chinese (Simplified)'}:\n\n${block.text}`
+    : `Source language: ${sourceLang || 'auto'}
 Target language: ${targetLang || 'Chinese (Simplified)'}
 Block ID: ${block.blockId}
 Block type: ${block.nodeType}
@@ -79,39 +92,41 @@ Return JSON: {translatedText, preservedTags, confidence}`;
       maxTokens: block.constraint === 'Concise' ? Math.ceil(block.text.length * 1.5) : 4096,
     });
 
-    try {
-      const parsed = this.parseJsonOutput<{
-        translatedText?: string;
-        preservedTags?: string[];
-        confidence?: number;
-      }>(raw);
-
-      const translatedText = parsed.translatedText || block.text;
-      const confidence = typeof parsed.confidence === 'number'
-        ? Math.max(0, Math.min(1, parsed.confidence))
-        : this.estimateConfidence(block.text, translatedText, block.constraint);
-
+    if (this.isDedicatedTranslator) {
+      // Dedicated translation models return plain text, not JSON
+      const translatedText = (raw || '').trim() || block.text;
+      const confidence = this.estimateConfidence(block.text, translatedText, block.constraint);
       return {
         blockId: block.blockId,
         originalText: block.text,
         translatedText,
-        preservedTags: Array.isArray(parsed.preservedTags) ? parsed.preservedTags : preservedTags,
+        preservedTags,
         confidence,
         domPath: block.domPath,
         constraint: block.constraint || 'ExpandAllowed',
       };
-    } catch {
-      // Fallback: treat raw output as direct translation
-      return {
-        blockId: block.blockId,
-        originalText: block.text,
-        translatedText: raw || block.text,
-        preservedTags,
-        confidence: 0.3,
-        domPath: block.domPath,
-        constraint: block.constraint || 'ExpandAllowed',
-      };
     }
+
+    const parsed = this.parseJsonOutput<{
+      translatedText?: string;
+      preservedTags?: string[];
+      confidence?: number;
+    }>(raw);
+
+    const translatedText = parsed.translatedText || block.text;
+    const confidence = typeof parsed.confidence === 'number'
+      ? Math.max(0, Math.min(1, parsed.confidence))
+      : this.estimateConfidence(block.text, translatedText, block.constraint);
+
+    return {
+      blockId: block.blockId,
+      originalText: block.text,
+      translatedText,
+      preservedTags: Array.isArray(parsed.preservedTags) ? parsed.preservedTags : preservedTags,
+      confidence,
+      domPath: block.domPath,
+      constraint: block.constraint || 'ExpandAllowed',
+    };
   }
 
   /**
@@ -169,6 +184,9 @@ Return JSON: {translatedText, preservedTags, confidence}`;
     const transLen = translated.length;
     if (origLen === 0) return 0.5;
 
+    // If translation is same as original (e.g., "OK" → "OK"), moderate confidence
+    if (original === translated) return 0.6;
+
     const ratio = transLen / origLen;
     switch (constraint) {
       case 'Concise':
@@ -179,7 +197,9 @@ Return JSON: {translatedText, preservedTags, confidence}`;
         return origLines === transLines ? 0.85 : 0.5;
       }
       default:
-        return ratio >= 0.5 && ratio <= 2.0 ? 0.8 : 0.4;
+        // For CJK translations, character ratio is naturally lower (1 Chinese char ≈ 2-3 English words)
+        // Accept ratio 0.3-2.0 as reasonable for EN→CJK
+        return ratio >= 0.2 && ratio <= 2.0 ? 0.8 : 0.4;
     }
   }
 }

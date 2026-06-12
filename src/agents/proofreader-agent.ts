@@ -74,17 +74,19 @@ export class ProofreaderAgent extends BaseAgent {
       }
     }
 
-    // Phase 3: Generate auto-patches for low/medium issues
-    for (const issue of issues) {
-      if (issue.severity === 'low' && issue.suggestion) {
-        patches.push({
-          blockId: issue.blockId,
-          action: 'native_rewrite',
-          patchedText: issue.suggestion,
-          confidence: 0.7,
-        });
-      }
+  // Phase 3: Generate auto-patches for low/medium issues
+  // NOTE: patches are SUGGESTIONS only — they are NOT auto-applied to translatedBlocks.
+  // The UI displays them for user review; only user-confirmed patches are applied.
+  for (const issue of issues) {
+    if (issue.severity === 'low' && issue.suggestion) {
+      patches.push({
+        blockId: issue.blockId,
+        action: 'native_rewrite',
+        patchedText: issue.suggestion,
+        confidence: 0.7,
+      });
     }
+  }
 
     const highSeverityCount = issues.filter(i => i.severity === 'high').length;
 
@@ -157,7 +159,7 @@ Return ONLY the polished translation text, no JSON wrapping, no explanations.`;
             blockId: block.blockId,
             type: 'term_mismatch',
             description: `Term "${entry.source}" was marked uncertain (wrapped in <term> tags) instead of using glossary translation "${entry.target}"`,
-            suggestion: block.translatedText.replace(`<term>${entry.source}</term>`, entry.target),
+            suggestion: block.translatedText.split(`<term>${entry.source}</term>`).join(entry.target),
             severity: 'medium',
           });
         } else {
@@ -224,8 +226,9 @@ Return ONLY the polished translation text, no JSON wrapping, no explanations.`;
 
     const ratio = transLen / origLen;
 
-    // Very short translation (< 30% of original) — likely missing content
-    if (ratio < 0.3) {
+  // Very short translation (< 20% of original) — likely missing content
+  // (EN→CJK: Chinese chars are denser, ratio 0.3-0.5 is normal)
+  if (ratio < 0.2) {
       issues.push({
         blockId: block.blockId,
         type: 'semantic_drift',
@@ -245,7 +248,7 @@ Return ONLY the polished translation text, no JSON wrapping, no explanations.`;
       });
     }
     // Moderate drift — low severity flag
-    else if (ratio < 0.5 || ratio > 1.8) {
+    else if (ratio < 0.3 || ratio > 1.8) {
       issues.push({
         blockId: block.blockId,
         type: 'semantic_drift',

@@ -64,7 +64,7 @@ function detectAdapter(baseUrl: string): AgentModelConfig['adapter'] {
   const url = (baseUrl || '').toLowerCase();
   if (url.indexOf(':11434') >= 0) return 'ollama';
   if (url.indexOf(':8080') >= 0) return 'llamacpp';
-  if (url.indexOf(':1234') >= 0) return 'mlx';
+  // LM Studio (:1234) uses OpenAI-compatible API
   return 'openai-compatible';
 }
 
@@ -78,12 +78,21 @@ function toAgentModelConfig(
   defaults: AgentsConfig,
 ): AgentModelConfig {
   const def: any = defaults[role] || (defaults.defaults as any || {})[role] || {};
-  const baseUrl = roleConfig.baseUrl || def.baseUrl || 'http://localhost:11434/v1';
+  // baseUrl and model MUST come from the frontend's ModelProfile (persisted in localStorage).
+  // If missing, the pipeline should fail with a clear error rather than silently calling a wrong endpoint.
+  const baseUrl = roleConfig.baseUrl || def.baseUrl;
+  if (!baseUrl) {
+    throw new Error(`[Orchestrator] ${role} agent has no baseUrl configured. Please configure a model profile in the Model Management Center.`);
+  }
+  const model = roleConfig.model || def.model;
+  if (!model) {
+    throw new Error(`[Orchestrator] ${role} agent has no model configured. Please configure a model profile in the Model Management Center.`);
+  }
   return {
     adapter: detectAdapter(baseUrl),
     baseUrl,
     apiKey: roleConfig.apiKey || def.apiKey,
-    model: roleConfig.model || def.model || 'qwen2.5:7b',
+    model,
     temperature: def.temperature,
     maxTokens: def.maxTokens,
   };
@@ -238,7 +247,10 @@ export class TranslationOrchestrator {
         console.log('[Orchestrator] Reviewing complete. Issues:', report.issues.length, '(high:', report.highSeverityCount, ')');
 
         // Auto-apply low-risk patches
-        this.applyAutoPatches(state, report);
+        // Auto-patches are NOT applied automatically to translatedBlocks.
+  // They are stored in the report for the UI to display as suggestions.
+  // Only user-confirmed edits should modify translatedBlocks.
+  // this.applyAutoPatches(state, report);
 
         // Single-block retry for high-severity issues (not full doc)
         if (this.config.proofreading.autoRetryOnHighSeverity && report.highSeverityCount > 0) {

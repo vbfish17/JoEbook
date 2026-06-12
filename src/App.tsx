@@ -1993,6 +1993,15 @@ function detectLanguage(text: string): string {
  const orchGlossaryTerms = await getActiveGlossaryTerms();
  const orchestratorDocId = sId + '-orch';
 
+ // Build blocks from originalParagraphs (already parsed by /api/parse-document)
+ const orchBlocks = originalParagraphs.map((text: string, idx: number) => ({
+ blockId: `block-${idx}`,
+ text,
+ nodeType: text.length <= 5 ? 'button' : 'paragraph',
+ domPath: `body/p[${idx}]`,
+ constraint: text.length <= 5 ? 'Concise' as const : 'ExpandAllowed' as const,
+ }));
+
  try {
  const orchResponse = await fetch('/api/orchestrator/run', {
  method: 'POST',
@@ -2004,13 +2013,13 @@ function detectLanguage(text: string): string {
  sourceLang,
  targetLang,
  domain: tone === 'professional' ? 'academic' : tone === 'technical' ? 'business' : 'general',
- blocks: [],
+ blocks: orchBlocks,
  roleModels: {
  planner: { apiKey: roleModels.planner.apiKey, baseUrl: roleModels.planner.baseUrl, model: roleModels.planner.model },
  executor: { apiKey: roleModels.executor.apiKey, baseUrl: roleModels.executor.baseUrl, model: roleModels.executor.model },
  proofreader: { apiKey: roleModels.proofreader.apiKey, baseUrl: roleModels.proofreader.baseUrl, model: roleModels.proofreader.model },
  },
- orchGlossaryTerms,
+ glossaryTerms: orchGlossaryTerms,
  }),
  });
  if (orchResponse.ok) {
@@ -2018,6 +2027,15 @@ function detectLanguage(text: string): string {
  // Use orchestrator polling to show detailed phase info
  startOrchestratorPolling(orchestratorDocId, currentFile);
  } else {
+ // Orchestrator failed to start — likely missing model config
+ let orchErrorMsg = '';
+ try { const errData = await orchResponse.json(); orchErrorMsg = errData.error || errData.errorEn || ''; } catch (_) {}
+ if (orchErrorMsg) {
+ setAgentStatus(currentLang === 'zh'
+ ? `编排器启动失败: ${orchErrorMsg}`
+ : `Orchestrator start failed: ${orchErrorMsg}`);
+ }
+ console.warn('[orchestrator] Start failed (HTTP', orchResponse.status, '):', orchErrorMsg, '— using standard polling');
  startPollingProgress(sId, currentFile);
  }
  } catch (orchErr) {

@@ -49,6 +49,8 @@ class Semaphore {
 
   release(): void {
     this.running--;
+    // Defensive: prevent double-release from driving running negative
+    if (this.running < 0) { this.running = 0; }
     if (this.queue.length > 0) {
       this.running++;
       const next = this.queue.shift();

@@ -240,10 +240,10 @@ export async function importTermbaseJSON(jsonStr: string, merge = true): Promise
       continue;
     }
     
-    // Check for duplicate
+    // Check for duplicate (case-insensitive, consistent with mergeTerms)
     const exists = termbase.some(t =>
-      t.source === entry.source
-        && t.target === entry.target
+      t.source.toLowerCase() === entry.source.toLowerCase()
+        && t.target.toLowerCase() === entry.target.toLowerCase()
         && (t.sourceLang || '') === (entry.sourceLang || '')
         && (t.targetLang || '') === (entry.targetLang || '')
         && (t.domain || '') === (entry.domain || '')
@@ -252,8 +252,8 @@ export async function importTermbaseJSON(jsonStr: string, merge = true): Promise
     if (exists && merge) {
       // Update frequency of existing entry
       const existing = termbase.find(t =>
-        t.source === entry.source
-          && t.target === entry.target
+        t.source.toLowerCase() === entry.source.toLowerCase()
+          && t.target.toLowerCase() === entry.target.toLowerCase()
           && (t.sourceLang || '') === (entry.sourceLang || '')
           && (t.targetLang || '') === (entry.targetLang || '')
           && (t.domain || '') === (entry.domain || '')
@@ -477,7 +477,10 @@ export function applyTerminologyToText(text: string, terms: Pick<TermEntry, 'sou
     .filter(t => t.source && t.target)
     .sort((a, b) => b.source.length - a.source.length);
   for (const term of sorted) {
-    output = output.split(term.source).join(term.target);
+    // Case-insensitive replacement (consistent with mergeTerms matching)
+    const escaped = term.source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, 'gi');
+    output = output.replace(regex, term.target);
   }
   return output;
 }

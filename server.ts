@@ -163,7 +163,10 @@ function applyTerminologyMemory(text: string, glossaryTerms?: { source: string; 
     .filter(t => t?.source && t?.target)
     .sort((a, b) => b.source.length - a.source.length);
   for (const term of sorted) {
-    output = output.split(term.source).join(term.target);
+    // Case-insensitive replacement: split on source (case-insensitively) and join with target
+    const escaped = term.source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, 'gi');
+    output = output.replace(regex, term.target);
   }
   return output;
 }
@@ -179,7 +182,7 @@ function normalizePdf2zhLang(value: string | undefined): string {
   if (text === 'chinese' || text === 'chinese (simplified)' || text === 'chinese (traditional)' || text === 'zh') return 'zh';
   if (text === 'japanese' || text === 'ja') return 'ja';
   if (text === 'korean' || text === 'ko') return 'ko';
-  return value || 'en';
+  return text || 'en';
 }
 
 function canUsePdf2zh(customApi?: CustomApiConfig): boolean {
@@ -1665,7 +1668,20 @@ const translationCaches: Record<string, {
   buffer?: Buffer;
   payload?: any;
   cleanupScheduled?: boolean;
+  _createdAt?: number;
 }> = {};
+
+// Periodic cleanup: sweep stale caches every 5 minutes (TTL: 30 min)
+setInterval(() => {
+  const now = Date.now();
+  for (const key of Object.keys(translationCaches)) {
+    const ttl = translationCaches[key]._createdAt ? (now - translationCaches[key]._createdAt!) : Infinity;
+    if (ttl > 30 * 60 * 1000) {
+      delete translationCaches[key];
+      if (activeSessions[key]) delete activeSessions[key];
+    }
+  }
+}, 5 * 60 * 1000);
 
 app.post('/api/translate', upload.single('file'), async (req, res): Promise<any> => {
   const file = req.file;
@@ -1760,19 +1776,19 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
 
       if (ext === '.docx') {
         mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-        outputBuffer = await translateDocx(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, agentPlan);
+        outputBuffer = await translateDocx(file.buffer, translateRunner, (msg) => updateProgress(25, msg), customApi, agentPlan);
         outputName = originalName.replace(/\.docx$/i, `_${targetLang}.docx`);
       } else if (ext === '.pptx') {
         mimeType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
-        outputBuffer = await translatePptx(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, agentPlan);
+        outputBuffer = await translatePptx(file.buffer, translateRunner, (msg) => updateProgress(25, msg), customApi, agentPlan);
         outputName = originalName.replace(/\.pptx$/i, `_${targetLang}.pptx`);
       } else if (ext === '.epub') {
         mimeType = 'application/epub+zip';
-        outputBuffer = await translateEpub(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, agentPlan);
+        outputBuffer = await translateEpub(file.buffer, translateRunner, (msg) => updateProgress(25, msg), customApi, agentPlan);
         outputName = originalName.replace(/\.epub$/i, `_${targetLang}.epub`);
       } else if (ext === '.md') {
         mimeType = 'text/markdown';
-        outputBuffer = await translateMarkdown(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, agentPlan);
+        outputBuffer = await translateMarkdown(file.buffer, translateRunner, (msg) => updateProgress(25, msg), customApi, agentPlan);
         outputName = originalName.replace(/\.md$/i, `_${targetLang}.md`);
       } else if (ext === '.pdf') {
         let pdfOut;
@@ -1780,47 +1796,47 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
         const canRunPythonScripts = hasPython && scriptExists('scripts/pdf_translate_workflow.py') && scriptExists('scripts/pdf_translate_via_pymupdf.py') && scriptExists('scripts/pdf_translate_via_pdf2zh.py');
         if (!canRunPythonScripts) {
           updateProgress(15, '使用内置 PDF 翻译引擎（纯 Node.js 无外部依赖）...');
-          pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang, agentPlan);
+          pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(25, msg), customApi, targetLang, agentPlan);
         } else {
           // Python available: run unified workflow (逐 span API 翻译 + 白底黑字精确覆盖 + 术语修正)
           try {
             updateProgress(15, '使用 Python 高保真工作流（逐 span 识别 + 白底黑字精细覆盖 + 专业术语修正）...');
-            pdfOut = await translatePdfViaWorkflow(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi || {}, sourceLang, targetLang, glossaryTerms);
+            pdfOut = await translatePdfViaWorkflow(file.buffer, (msg) => updateProgress(25, msg), customApi || {}, sourceLang, targetLang, glossaryTerms);
           } catch (workflowErr: any) {
             console.warn('[workflow fallback]', workflowErr?.message || workflowErr);
             // Fallback to PyMuPDF if custom API is configured
             if (canUsePymupdf(customApi)) {
               try {
                 updateProgress(35, 'High-fidelity workflow failed, falling back to PyMuPDF engine...');
-                pdfOut = await translatePdfViaPymupdf(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
+                pdfOut = await translatePdfViaPymupdf(file.buffer, (msg) => updateProgress(25, msg), customApi!, sourceLang, targetLang);
               } catch (pymupdfErr: any) {
                 console.warn('[pymupdf fallback]', pymupdfErr?.message || pymupdfErr);
                 if (canUsePdf2zh(customApi)) {
                   try {
                     updateProgress(45, 'PyMuPDF failed, falling back to PDFMathTranslate engine...');
-                    pdfOut = await translatePdfViaPdf2zh(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
+                    pdfOut = await translatePdfViaPdf2zh(file.buffer, (msg) => updateProgress(25, msg), customApi!, sourceLang, targetLang);
                   } catch (pdf2zhErr: any) {
                     console.warn('[pdf2zh fallback]', pdf2zhErr?.message || pdf2zhErr);
                     updateProgress(55, 'All Python engines failed, falling back to basic text-only PDF rebuilder...');
-                    pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang, agentPlan);
+                    pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(25, msg), customApi, targetLang, agentPlan);
                   }
                 } else {
                   updateProgress(45, 'No pdf2zh API config, falling back to basic text-only PDF rebuilder...');
-                  pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang, agentPlan);
+                  pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(25, msg), customApi, targetLang, agentPlan);
                 }
               }
             } else if (canUsePdf2zh(customApi)) {
               try {
                 updateProgress(35, 'High-fidelity workflow failed, falling back to PDFMathTranslate engine...');
-                pdfOut = await translatePdfViaPdf2zh(file.buffer, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi!, sourceLang, targetLang);
+                pdfOut = await translatePdfViaPdf2zh(file.buffer, (msg) => updateProgress(25, msg), customApi!, sourceLang, targetLang);
               } catch (pdf2zhErr: any) {
                 console.warn('[pdf2zh fallback]', pdf2zhErr?.message || pdf2zhErr);
                 updateProgress(45, 'PDFMathTranslate failed, falling back to basic text-only PDF rebuilder...');
-                pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang, agentPlan);
+                pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(25, msg), customApi, targetLang, agentPlan);
               }
             } else {
               updateProgress(35, 'No custom API config available, using basic text-only PDF rebuilder...');
-              pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(20 + Math.random() * 60, msg), customApi, targetLang, agentPlan);
+              pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(25, msg), customApi, targetLang, agentPlan);
             }
           }
         }
@@ -1836,9 +1852,9 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
       }
 
       if (jsonPayload) {
-        translationCaches[sId] = { isJson: true, payload: jsonPayload };
+        translationCaches[sId] = { isJson: true, payload: jsonPayload, _createdAt: Date.now() };
       } else if (outputBuffer) {
-        translationCaches[sId] = { isJson: false, buffer: outputBuffer, mimeType, outputName };
+        translationCaches[sId] = { isJson: false, buffer: outputBuffer, mimeType, outputName, _createdAt: Date.now() };
       }
 
       updateProgress(100, '翻译与排版完成！文档在缓存中准备下载...');
@@ -2031,6 +2047,7 @@ async function callLLM(
   userPrompt: string,
   temperature: number = 0.3
 ): Promise<string | null> {
+  try {
   let useOfficialGoogleSdk = false;
   if (customApi.apiKey && customApi.apiKey !== 'not-required') {
     const bUrl = customApi.baseUrl || '';
@@ -2069,6 +2086,10 @@ async function callLLM(
   }
 
   return null;
+  } catch (err) {
+    console.warn('[callLLM] LLM call failed:', err);
+    return null;
+  }
 }
 
 function plannerSystemPrompt(sourceLang: string, targetLang: string, tone: string, glossaryTerms?: { source: string; target: string }[]): string {
@@ -2780,8 +2801,20 @@ echo "=========================================================="`;
 // server-side TranslationOrchestrator. Role model configs come from
 // the frontend's resolveAgentRoleApis() — NOT hardcoded.
 
-// In-memory orchestrator instances (keyed by documentId)
+// In-memory orchestrator instances (keyed by documentId), auto-cleaned after 30 min
 const orchestratorSessions: Record<string, any> = {};
+const ORCHESTRATOR_SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+function cleanupOrchestratorSessions(): void {
+  const now = Date.now();
+  for (const key of Object.keys(orchestratorSessions)) {
+    if (orchestratorSessions[key]._createdAt && (now - orchestratorSessions[key]._createdAt) > ORCHESTRATOR_SESSION_TTL_MS) {
+      delete orchestratorSessions[key];
+    }
+  }
+}
+// Run cleanup every 5 minutes
+setInterval(cleanupOrchestratorSessions, 5 * 60 * 1000);
 
 // POST /api/orchestrator/run — Start a multi-agent pipeline run
 app.post('/api/orchestrator/run', express.json(), async (req: any, res: any) => {
@@ -2814,11 +2847,17 @@ app.post('/api/orchestrator/run', express.json(), async (req: any, res: any) => 
       })),
     };
 
-    const roleModelConfig = roleModels || {
-      planner: { baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5:7b' },
-      executor: { baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5:7b' },
-      proofreader: { baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5:7b' },
-    };
+  // Require roleModels from frontend — user must configure models in the UI before starting the pipeline.
+  // roleModels are resolved from persisted ModelProfile + agentRoleProfileIds in localStorage.
+  // No hardcoded fallback: if not provided, return error asking user to configure.
+  if (!roleModels || !roleModels.planner?.baseUrl || !roleModels.executor?.baseUrl || !roleModels.proofreader?.baseUrl) {
+    return res.status(400).json({
+      error: '缺少智能体模型配置。请在"模型管理中心"中为各角色（规划/执行/校对）配置并保存模型档案后再启动翻译流水线。',
+      errorEn: 'Missing agent model configuration. Please configure and save model profiles for each role (Planner/Executor/Proofreader) in the Model Management Center before starting the pipeline.',
+    });
+  }
+
+  const roleModelConfig = roleModels;
 
     const existingGlossary = glossaryTerms || [];
 
@@ -2835,6 +2874,7 @@ app.post('/api/orchestrator/run', express.json(), async (req: any, res: any) => 
       status: '初始化编排器...',
       progress: 0,
       phase: 'planning',
+      _createdAt: Date.now(),
     };
 
     // Run async — return immediately, client polls progress
@@ -2876,9 +2916,14 @@ app.post('/api/orchestrator/polish', express.json(), async (req: any, res: any) 
     }
 
     const { TranslationOrchestrator } = await import('./src/orchestrator/translation-orchestrator.js');
-    const roleModelConfig = roleModels || {
-      proofreader: { baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5:7b' },
-    };
+  if (!roleModels || !roleModels.proofreader?.baseUrl) {
+    return res.status(400).json({
+      error: '缺少校对智能体模型配置。请在"模型管理中心"中配置并保存模型档案后再使用润色功能。',
+      errorEn: 'Missing proofreader model configuration. Please configure and save a model profile in the Model Management Center before using the polish feature.',
+    });
+  }
+
+  const roleModelConfig = roleModels;
 
     const orchestrator = new TranslationOrchestrator();
     const polishedText = await orchestrator.polishBlock(

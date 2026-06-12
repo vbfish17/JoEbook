@@ -2,14 +2,14 @@
  <br />
  <img src="./assets/JoE_round.png" alt="JoEbook Logo" width="128" height="128" />
  <h1>🚀 JoEbook (久易)</h1>
- <p><b>Intelligent Form-Preserving Document Translation & Dual-Pane Proofreading Workspace</b></p>
+ <p><b>Multi-Agent Intelligent Form-Preserving Document Translation & Dual-Pane Proofreading Workspace</b></p>
 
  <p>
  A next-generation form-preserving document translation system powered by LLM context alignment, designed for academic PDFs, e-books, and business reports.
  </p>
 
  <p>
- <img src="https://img.shields.io/badge/Release-v1.3.0-blue?style=flat-square" alt="Version" />
+ <img src="https://img.shields.io/badge/Release-v2.0.0-blue?style=flat-square" alt="Version" />
  <img src="https://img.shields.io/badge/React-19-61dafb?style=flat-square&logo=react" alt="React 19" />
  <img src="https://img.shields.io/badge/TailwindCSS-v4.0-38bdf8?style=flat-square&logo=tailwindcss" alt="Tailwind CSS v4" />
  <img src="https://img.shields.io/badge/Electron-Desktop-47848F?style=flat-square&logo=electron" alt="Electron Native" />
@@ -83,6 +83,53 @@ In traditional document translation scenarios, we constantly face broken formatt
 ---
 
 ## 📋 Changelog
+
+### v2.0.0 (2026-06-12) — Major: Multi-Agent Translation Pipeline & Translation Memory
+
+> JoEbook 2.0 introduces a paradigm shift from single-step LLM translation to a structured multi-agent pipeline, dramatically improving translation quality, consistency, and user control.
+
+#### 🤖 Multi-Agent Translation Pipeline
+- **Planner-Executor-Reviewer Architecture**: Translation is now orchestrated through three specialized agents — a Planner reads and structures the document, an Executor performs the actual translation, and a Reviewer (Proofreader) evaluates and improves quality.
+- **Full Auto-Execution**: No user intervention needed. The orchestrator automatically plans, executes, and reviews translations with configurable timeouts per phase.
+- **Single-Block Retry for High-Severity Issues**: During the reviewing phase, only blocks that fail quality review are retried, optimizing both speed and cost.
+- **Per-Role Model Profiles**: Each agent role can use a different LLM model with independent API key and base URL configuration via `agents.config.json`.
+- **Fallback Mode**: When orchestrator starts fail, the system seamlessly falls back to standard single-step translation.
+
+#### 🧠 Translation Memory & Termbase
+- **Custom Terminology Dictionary**: Import, manage, and edit domain-specific term mappings with source/target language detection.
+- **Auto-Detect Source Language**: Real-time language detection on input with dropdown selection for both source and target languages.
+- **CSV/JSON/TXT Import**: Drag-and-drop zone for bulk terminology imports in multiple formats.
+- **Learning from Edits**: Termbase learns candidate terms from proofreading edits, building a growing knowledge base.
+- **Glossary Injection**: Custom term mappings are automatically injected into translation requests and the PDF workflow, ensuring consistent terminology.
+- **Domain Tagging**: Terms can be tagged with domain labels for context-aware matching.
+- **Export**: CSV and JSON export buttons for termbase backup and sharing.
+
+#### 🎨 Frontend Enhancements
+- **Orchestrator Polling UI**: Real-time progress tracking showing phase-specific messages (Planning → Executing → Reviewing → Completed/Failed).
+- **Termbase Table UI**: Redesigned as a full table layout with editable language dropdowns per term row, domain field, and bulk import.
+- **AI Assist Toolbar**: New toolbar component for AI-driven tone adjustments and quality controls.
+- **Proofreading Badge**: Visual quality indicators showing review status per translation block.
+- **Progress Fix**: Progress polling now uses 0 as fallback instead of 10, preventing the orchestrator from getting stuck at 10%.
+
+#### 🛠️ Technical Improvements
+- **Type Safety**: New `types.ts` defines `LLMConfig`, `PlannerOutput`, `ExecutorOutput`, `ReviewerOutput`, and `llmConfigToAgentConfig()` helper.
+- **LLM Adapter Factory**: `createAdapterFromLLMConfig()` factory enables per-role LLM configuration with per-call timeout support.
+- **Executor Pool**: Default concurrency reduced from 4 to 2 to avoid OOM on small-VRAM machines.
+- **With-Retry Wrapper**: `withRetry()` utility provides robust error handling for agent execution.
+- **Improved Error Messages**: LLM connection failures now include detailed diagnostic info for API misconfiguration.
+
+#### 📄 New Files
+- `AGENTS_DESIGN.md` — Design documentation for the multi-agent system
+- `INTEGRATION_GUIDE.md` — API integration guide for backend developers
+- `agents.config.json` — Configuration for multi-agent pipeline (concurrency, timeouts, model profiles)
+- `prompts/planner.prompt.txt`, `prompts/executor.prompt.txt`, `prompts/proofreader.prompt.txt` — Role-specific system prompts
+- `src/agents/` — New directory with base-agent, planner, executor, proofreader, executor-pool
+- `src/model-gateway/llm-adapter.ts` — LLM adapter factory with per-role config
+- `src/ui/ai-assist-toolbar.tsx` — AI assist toolbar component
+- `src/ui/proofreading-badge.tsx` — Proofreading quality badge component
+- `tests/` — New test directory with 92 tests across 7 files
+
+---
 
 ### v1.3.0 (2026-05-28)
 * **PDF High-Fidelity Translation**: Two-pass overlay strategy prevents translated text from being covered by overlapping white rectangles
