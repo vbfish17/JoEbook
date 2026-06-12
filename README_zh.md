@@ -9,7 +9,7 @@
  </p>
 
  <p>
- <img src="https://img.shields.io/badge/Release-v1.3.0-blue?style=flat-square" alt="Version" />
+ <img src="https://img.shields.io/badge/Release-v2.0.0-blue?style=flat-square" alt="Version" />
  <img src="https://img.shields.io/badge/React-19-61dafb?style=flat-square&logo=react" alt="React 19" />
  <img src="https://img.shields.io/badge/TailwindCSS-v4.0-38bdf8?style=flat-square&logo=tailwindcss" alt="Tailwind CSS v4" />
  <img src="https://img.shields.io/badge/Electron-Desktop-47848F?style=flat-square&logo=electron" alt="Electron Native" />
@@ -83,6 +83,35 @@
 ---
 
 ## 📋 更新日志 (Changelog)
+
+### v2.0.0 (2026-06-12) — 重大更新：多智能体翻译管道 & 翻译记忆
+
+**多智能体翻译管道（Planner→Executor→Reviewer）**
+- 翻译流程升级为三阶段智能体协作：Planner 读取并结构化文档，Executor 执行翻译，Reviewer 评估和提升质量
+- 全自动执行，无需用户干预，每阶段可配置超时
+- 高质量审核通过，仅低质量段落重试，优化速度与成本
+- 每个角色可使用不同的 LLM 模型，独立配置 API 密钥和 Base URL
+
+**翻译记忆与术语库**
+- 自定义术语词典，支持源/目标语言自动检测和手动选择
+- CSV/JSON/TXT 拖拽批量导入，支持领域标签标记
+- 术语自动注入翻译请求和 PDF 工作流，确保术语一致性
+- 从校对编辑中学习候选术语，持续积累知识库
+- 提供 CSV 和 JSON 导出功能
+
+**前端增强**
+- 智能体编排进度轮询 UI，分阶段显示状态（规划→执行→审核→完成/失败）
+- 术语库表格 UI 重构，每行术语支持可编辑语言下拉框
+- 新增 AI 辅助工具栏和校对质量徽章
+- 修复进度轮询卡在 10% 的问题
+
+**技术改进**
+- 类型安全架构，新增 LLMConfig、PlannerOutput、ExecutorOutput、ReviewerOutput
+- LLM Adapter 工厂模式，支持 per-call 超时
+- 执行器池默认并发从 4 降至 2（防止小内存机器 OOM）
+- 92 个测试全部通过
+
+---
 
 ### v1.3.0 (2026-05-28)
 * **PDF 高保真覆盖式翻译**：两遍法覆盖策略，先绘制所有白底色块，再统一插入所有译文，确保译文文字不被相邻色块遮挡
