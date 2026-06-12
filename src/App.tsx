@@ -1983,70 +1983,17 @@ function detectLanguage(text: string): string {
         ? (allFiles.length > 1 ? `正在处理第 ${fi + 1}/${allFiles.length} 个文件...` : '正在连接后端引擎...')
         : (allFiles.length > 1 ? `Processing file ${fi + 1}/${allFiles.length}...` : 'Connecting to background translator...'));
 
- // Multi-agent orchestrator: when enabled, start the orchestrator pipeline
- // in ADDITION to the standard translate path. The standard path handles
- // file parsing + format reconstruction; the orchestrator enhances
- // terminology consistency and quality in the background.
- // The progress bar shows orchestrator phase when available.
+ // Multi-agent orchestration is now handled entirely within the standard
+ // /api/translate path via the agentPlan payload (which includes enabled=true
+ // and modelProfiles). The server-side translateRunner lazily triggers
+ // Planner → Executor → Reviewer in sequence for each batch.
+ // The old V2 /api/orchestrator/run path is no longer launched in parallel,
+ // avoiding duplicate work and race conditions on the download cache.
  if (agentOrchestrationEnabled) {
- const roleModels = resolveAgentRoleApis();
- const orchGlossaryTerms = await getActiveGlossaryTerms();
- const orchestratorDocId = sId + '-orch';
-
- // Build blocks from originalParagraphs (already parsed by /api/parse-document)
- const orchBlocks = originalParagraphs.map((text: string, idx: number) => ({
- blockId: `block-${idx}`,
- text,
- nodeType: text.length <= 5 ? 'button' : 'paragraph',
- domPath: `body/p[${idx}]`,
- constraint: text.length <= 5 ? 'Concise' as const : 'ExpandAllowed' as const,
- }));
-
- try {
- const orchResponse = await fetch('/api/orchestrator/run', {
- method: 'POST',
- headers: { 'Content-Type': 'application/json' },
- body: JSON.stringify({
- documentId: orchestratorDocId,
- fileName: currentFile.name,
- fileType: currentFile.name.split('.').pop()?.toLowerCase() || 'docx',
- sourceLang,
- targetLang,
- domain: tone === 'professional' ? 'academic' : tone === 'technical' ? 'business' : 'general',
- tone,
- blocks: orchBlocks,
- roleModels: {
- planner: { apiKey: roleModels.planner.apiKey, baseUrl: roleModels.planner.baseUrl, model: roleModels.planner.model },
- executor: { apiKey: roleModels.executor.apiKey, baseUrl: roleModels.executor.baseUrl, model: roleModels.executor.model },
- proofreader: { apiKey: roleModels.proofreader.apiKey, baseUrl: roleModels.proofreader.baseUrl, model: roleModels.proofreader.model },
- },
- glossaryTerms: orchGlossaryTerms,
- // Send file as base64 so orchestrator can reconstruct translated file after pipeline
- fileBuffer: await blobToBase64(currentFile),
- }),
- });
- if (orchResponse.ok) {
- console.log('[orchestrator] Pipeline started for', orchestratorDocId);
- // Use orchestrator polling to show detailed phase info
- startOrchestratorPolling(orchestratorDocId, currentFile);
+   setAgentStatus(currentLang === 'zh' ? '多智能体编排已启用（规划→执行→校对）' : 'Multi-agent orchestration enabled (Plan→Execute→Review)');
+   startPollingProgress(sId, currentFile);
  } else {
- // Orchestrator failed to start — likely missing model config
- let orchErrorMsg = '';
- try { const errData = await orchResponse.json(); orchErrorMsg = errData.error || errData.errorEn || ''; } catch (_) {}
- if (orchErrorMsg) {
- setAgentStatus(currentLang === 'zh'
- ? `编排器启动失败: ${orchErrorMsg}`
- : `Orchestrator start failed: ${orchErrorMsg}`);
- }
- console.warn('[orchestrator] Start failed (HTTP', orchResponse.status, '):', orchErrorMsg, '— using standard polling');
- startPollingProgress(sId, currentFile);
- }
- } catch (orchErr) {
- console.warn('[orchestrator] Start error, using standard polling:', orchErr);
- startPollingProgress(sId, currentFile);
- }
- } else {
- startPollingProgress(sId, currentFile);
+   startPollingProgress(sId, currentFile);
  }
 
  // Wait for polling to detect completion via batchResolveRef
@@ -2066,19 +2013,16 @@ function detectLanguage(text: string): string {
  formData.append('customBaseUrl', customApi.baseUrl);
  formData.append('customModel', customApi.model);
  }
- const glossaryTermsForFormData = await getActiveGlossaryTerms();
- formData.append('glossaryTerms', JSON.stringify(glossaryTermsForFormData));
- if (agentOrchestrationEnabled) {
- const plan = planAgentAllocation({
- totalItems: allFiles.length,
- batchSize: 2,
- maxExecutors: agentMaxExecutors,
- enableProofreader: true,
- roleApi: resolveAgentRoleApis(),
- });
- formData.append('agentPlan', JSON.stringify(plan));
-        setAgentStatus(plan.summary);
-      }
+        formData.append('glossaryTerms', JSON.stringify(glossaryTermsForFormData));
+
+        // When agent orchestration is enabled, use the full payload (with enabled + modelProfiles)
+        // so that the standard translation path also runs Planner → Executor → Reviewer.
+        // When disabled, no agentPlan is sent (standard translation only).
+        if (agentOrchestrationEnabled) {
+          const fullPlan = buildAgentPlanPayload();
+          formData.append('agentPlan', JSON.stringify(fullPlan));
+          setAgentStatus(fullPlan.summary);
+        }
 
       try {
         const response = await fetch('/api/translate', {

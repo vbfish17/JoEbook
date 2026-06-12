@@ -2096,7 +2096,12 @@ function plannerSystemPrompt(sourceLang: string, targetLang: string, tone: strin
   const glossarySection = glossaryTerms && glossaryTerms.length > 0
     ? `\nExisting terminology mapping:\n${glossaryTerms.map(t => `  ${t.source} → ${t.target}`).join('\n')}`
     : '';
-  return `You are a translation planning agent. Analyze the given text segments and output a concise translation strategy as JSON with keys: "strategy" (string: overall approach), "keyTerms" (array of {source, target} objects for critical terms), "notes" (string: any special handling instructions). Keep keyTerms to at most 10 most important items.${glossarySection}`;
+  return `You are a translation planning agent. You MUST output valid JSON only (no markdown, no code fences). Analyze the given text segments and output JSON with exactly these keys:
+- "strategy": string — overall translation approach
+- "keyTerms": array of objects, each with keys "source" (original term in source language) and "target" (translated term in target language). Example: {"source": "social media", "target": "社交媒体"}. Keep to at most 10 items.
+- "notes": string — any special handling instructions
+
+CRITICAL: keyTerms items MUST use "source" and "target" keys. Do NOT use "english", "chinese_translation" or any other key names.${glossarySection}`;
 }
 
 async function plannerAnalyze(
@@ -2111,7 +2116,9 @@ async function plannerAnalyze(
   if (!customApi || !customApi.baseUrl) return defaultResult;
   
   const systemPrompt = plannerSystemPrompt(sourceLang, targetLang, tone, glossaryTerms);
-  const userPrompt = `Analyze these ${texts.length} text segments for translation from ${sourceLang} to ${targetLang} (tone: ${tone}):\n${texts.slice(0, 20).map((t, i) => `${i + 1}. ${t}`).join('\n')}${texts.length > 20 ? `\n... and ${texts.length - 20} more segments` : ''}`;
+  // Increase sample to 30 segments for better coverage (esp. for long EPUB/books)
+  const sampleLimit = Math.min(30, texts.length);
+  const userPrompt = `Analyze these ${texts.length} text segments for translation from ${sourceLang} to ${targetLang} (tone: ${tone}):\n${texts.slice(0, sampleLimit).map((t, i) => `${i + 1}. ${t.substring(0, 200)}`).join('\n')}${texts.length > sampleLimit ? `\n... and ${texts.length - sampleLimit} more segments` : ''}`;
 
   try {
     const result = await callLLM(customApi, systemPrompt, userPrompt, 0.2);
@@ -2120,7 +2127,12 @@ async function plannerAnalyze(
     const parsed = JSON.parse(cleaned);
     return {
       strategy: String(parsed.strategy || 'direct'),
-      keyTerms: Array.isArray(parsed.keyTerms) ? parsed.keyTerms.slice(0, 10).map((t: any) => ({ source: String(t.source || ''), target: String(t.target || '') })).filter((t: any) => t.source && t.target) : [],
+      keyTerms: Array.isArray(parsed.keyTerms) ? parsed.keyTerms.slice(0, 10).map((t: any) => {
+        // Robust parsing: accept {"source":"x","target":"y"} or {"english":"x","chinese_translation":"y"} etc.
+        const src = String(t.source || t.english || t.en || t.original || '');
+        const tgt = String(t.target || t.chinese_translation || t.zh || t.translation || t.translated || '');
+        return { source: src, target: tgt };
+      }).filter((t: any) => t.source && t.target) : [],
       notes: String(parsed.notes || ''),
     };
   } catch (err) {
