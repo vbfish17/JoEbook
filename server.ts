@@ -960,10 +960,11 @@ async function batchTranslateWithConcurrency(
   progress: (msg: string) => void,
   customApi?: { apiKey?: string; baseUrl?: string; model?: string },
   contextName: string = "文档",
-  agentPlan?: AgentPlanPayload
+  agentPlan?: AgentPlanPayload,
+  updateSession?: (pct: number, msg: string) => void
 ): Promise<string[]> {
   const isCustom = !!(customApi && customApi.baseUrl);
-  const fallbackBatchSize = isCustom ? 40 : 8;
+  const fallbackBatchSize = isCustom ? 40 : 20;
   const batchSize = estimateAgentBatchSize(agentPlan, fallbackBatchSize);
   const batchDelay = isCustom ? 50 : 1200;
   const concurrency = isAgentPlanEnabled(agentPlan) ? estimateExecutorCount(agentPlan) : (isCustom ? 4 : 1);
@@ -987,6 +988,7 @@ async function batchTranslateWithConcurrency(
       const batch = batches[batchIdx];
       const batchTexts = batch.map(b => b.text);
       
+      if (updateSession) updateSession(Math.round(25 + 70 * ((batchIdx + 0.5) / totalBatches)), `正在编译翻译 ${contextName}: 第 ${batchIdx + 1}/${totalBatches} 组...`);
       progress(`正在编译翻译 ${contextName}: 第 ${batchIdx + 1}/${totalBatches} 组...`);
 
       try {
@@ -1000,7 +1002,8 @@ async function batchTranslateWithConcurrency(
       }
 
       completed += batch.length;
-      progress(`翻译 ${contextName} 进度: ${completed}/${pList.length} (${Math.round(completed * 100 / pList.length)}%)...`);
+            if (updateSession) updateSession(Math.round(25 + 70 * (completed / pList.length)), `翻译 ${contextName} 进度: ${completed}/${pList.length}`);
+      progress(`翻译 ${contextName} 进度: ${completed}/${pList.length}...`);
 
       if (batchDelay > 0 && activeBatchIdx < totalBatches) {
         await delay(batchDelay);
@@ -1020,7 +1023,8 @@ export async function translateDocx(
   translateFn: (texts: string[]) => Promise<string[]>,
   progress: (msg: string) => void,
   customApi?: { apiKey?: string; baseUrl?: string; model?: string },
-  agentPlan?: AgentPlanPayload
+  agentPlan?: AgentPlanPayload,
+  updateSession?: (pct: number, msg: string) => void
 ): Promise<Buffer> {
   const zip = await JSZip.loadAsync(fileBuffer);
   
@@ -1086,7 +1090,7 @@ export async function translateDocx(
   progress(`过滤后共有 ${pList.length} 个待翻译的有效文本块...`);
   
   // Process with concurrency pool
-  const translations = await batchTranslateWithConcurrency(pList, translateFn, progress, customApi, "DOCX", agentPlan);
+  const translations = await batchTranslateWithConcurrency(pList, translateFn, progress, customApi, "DOCX", agentPlan, updateSession);
   
   // Reconstruct XML files in Zip
   for (let fileIdx = 0; fileIdx < fileParagraphs.length; fileIdx++) {
@@ -1143,7 +1147,8 @@ async function translatePptx(
   translateFn: (texts: string[]) => Promise<string[]>,
   progress: (msg: string) => void,
   customApi?: { apiKey?: string; baseUrl?: string; model?: string },
-  agentPlan?: AgentPlanPayload
+  agentPlan?: AgentPlanPayload,
+  updateSession?: (pct: number, msg: string) => void
 ): Promise<Buffer> {
   console.log(`[translatePptx] Input file buffer length: ${fileBuffer.length} bytes (${(fileBuffer.length / 1024 / 1024).toFixed(2)} MB)`);
   const zip = await JSZip.loadAsync(fileBuffer);
@@ -1210,7 +1215,7 @@ async function translatePptx(
   progress(`过滤后存在 ${pList.length} 个非空幻灯片文本项进行翻译...`);
   
   // Process with concurrency pool
-  const translations = await batchTranslateWithConcurrency(pList, translateFn, progress, customApi, "PPTX", agentPlan);
+  const translations = await batchTranslateWithConcurrency(pList, translateFn, progress, customApi, "PPTX", agentPlan, updateSession);
   
   for (let fileIdx = 0; fileIdx < fileParagraphs.length; fileIdx++) {
     const item = fileParagraphs[fileIdx];
@@ -1265,7 +1270,8 @@ async function translateEpub(
   translateFn: (texts: string[]) => Promise<string[]>,
   progress: (msg: string) => void,
   customApi?: { apiKey?: string; baseUrl?: string; model?: string },
-  agentPlan?: AgentPlanPayload
+  agentPlan?: AgentPlanPayload,
+  updateSession?: (pct: number, msg: string) => void
 ): Promise<Buffer> {
   const zip = await JSZip.loadAsync(fileBuffer);
   
@@ -1328,7 +1334,7 @@ async function translateEpub(
   });
   
   // Process with concurrency pool
-  const translations = await batchTranslateWithConcurrency(translateList, translateFn, progress, customApi, "EPUB", agentPlan);
+  const translations = await batchTranslateWithConcurrency(translateList, translateFn, progress, customApi, "EPUB", agentPlan, updateSession);
   
   for (let fileIdx = 0; fileIdx < fileElements.length; fileIdx++) {
     const item = fileElements[fileIdx];
@@ -1372,7 +1378,8 @@ async function translateMarkdown(
   translateFn: (texts: string[]) => Promise<string[]>,
   progress: (msg: string) => void,
   customApi?: { apiKey?: string; baseUrl?: string; model?: string },
-  agentPlan?: AgentPlanPayload
+  agentPlan?: AgentPlanPayload,
+  updateSession?: (pct: number, msg: string) => void
 ): Promise<Buffer> {
   const mdContent = fileBuffer.toString('utf8');
   const blocks = mdContent.split(/\r?\n\r?\n/);
@@ -1469,7 +1476,8 @@ async function translatePdf(
   progress: (msg: string) => void,
   customApi?: { apiKey?: string; baseUrl?: string; model?: string },
   targetLang: string = "zh",
-  agentPlan?: AgentPlanPayload
+  agentPlan?: AgentPlanPayload,
+  updateSession?: (pct: number, msg: string) => void
 ): Promise<{ docxBuffer: Buffer; pdfBuffer: Buffer; textContent: string }> {
   progress(`正在读取并解析 PDF 文本排版数据...`);
   const data = await pdfParse(fileBuffer);
@@ -1490,9 +1498,8 @@ async function translatePdf(
 
   progress(`过滤提取出共有 ${pList.length} 个待排版翻译的有效文本块...`);
   const pListWithIdx = pList.map((item, idx) => ({ originIdx: idx, text: item.text }));
-  const translations = await batchTranslateWithConcurrency(pListWithIdx, translateFn, progress, customApi, "PDF段落", agentPlan);
-  console.log('[translatePdf] pList sample', pList.slice(0, 5));
-  console.log('[translatePdf] translations sample', translations.slice(0, 5));
+  const translations = await batchTranslateWithConcurrency(pListWithIdx, translateFn, progress, customApi, "PDF段落", agentPlan, updateSession);
+  // [translatePdf] batch I/O logging suppressed
 
   const translatedPages: string[] = [];
   for (let pIdx = 0; pIdx < pages.length; pIdx++) {
@@ -1713,6 +1720,8 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
  ? parsedGlossary.map((t: any) => ({ source: String(t.source), target: String(t.target) }))
  : undefined;
   const agentPlan = parseJsonField<AgentPlanPayload>(req.body.agentPlan);
+  const _planEnabled = isAgentPlanEnabled(agentPlan);
+  console.log(`[agentPlan] enabled=${_planEnabled}, hasModelProfiles=${!!agentPlan?.modelProfiles}, executorBatches=${agentPlan?.executorBatches?.length || 0}, plannerModel=${agentPlan?.modelProfiles?.planner?.model || agentPlan?.roles?.planner?.api?.model || 'none'}, executorModel=${agentPlan?.modelProfiles?.executor?.model || agentPlan?.roles?.executor?.api?.model || 'none'}, proofreaderModel=${agentPlan?.modelProfiles?.proofreader?.model || agentPlan?.roles?.proofreader?.api?.model || 'none'}`);
   if (agentPlan?.summary) console.log('[agent orchestration]', agentPlan.summary);
 
   // Session state updates for progress bar reporting
@@ -1764,9 +1773,8 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
  }
  }
  }
- console.log('[translateRunner] batch in', textBatch);
- console.log('[translateRunner] batch out', translated);
- return translated;
+  // [translateRunner] batch I/O logging suppressed for performance
+  return translated;
  };
 
       let outputBuffer: Buffer | null = null;
@@ -1776,19 +1784,19 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
 
       if (ext === '.docx') {
         mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-        outputBuffer = await translateDocx(file.buffer, translateRunner, (msg) => updateProgress(25, msg), customApi, agentPlan);
+        outputBuffer = await translateDocx(file.buffer, translateRunner, (msg) => { console.log(`[DOCX] ${msg}`); }, customApi, agentPlan, updateProgress);
         outputName = originalName.replace(/\.docx$/i, `_${targetLang}.docx`);
       } else if (ext === '.pptx') {
         mimeType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
-        outputBuffer = await translatePptx(file.buffer, translateRunner, (msg) => updateProgress(25, msg), customApi, agentPlan);
+        outputBuffer = await translatePptx(file.buffer, translateRunner, (msg) => { console.log(`[PPTX] ${msg}`); }, customApi, agentPlan, updateProgress);
         outputName = originalName.replace(/\.pptx$/i, `_${targetLang}.pptx`);
       } else if (ext === '.epub') {
         mimeType = 'application/epub+zip';
-        outputBuffer = await translateEpub(file.buffer, translateRunner, (msg) => updateProgress(25, msg), customApi, agentPlan);
+        outputBuffer = await translateEpub(file.buffer, translateRunner, (msg) => { console.log(`[EPUB] ${msg}`); }, customApi, agentPlan, updateProgress);
         outputName = originalName.replace(/\.epub$/i, `_${targetLang}.epub`);
       } else if (ext === '.md') {
         mimeType = 'text/markdown';
-        outputBuffer = await translateMarkdown(file.buffer, translateRunner, (msg) => updateProgress(25, msg), customApi, agentPlan);
+        outputBuffer = await translateMarkdown(file.buffer, translateRunner, (msg) => { console.log(`[MD] ${msg}`); }, customApi, agentPlan, updateProgress);
         outputName = originalName.replace(/\.md$/i, `_${targetLang}.md`);
       } else if (ext === '.pdf') {
         let pdfOut;
@@ -1796,7 +1804,7 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
         const canRunPythonScripts = hasPython && scriptExists('scripts/pdf_translate_workflow.py') && scriptExists('scripts/pdf_translate_via_pymupdf.py') && scriptExists('scripts/pdf_translate_via_pdf2zh.py');
         if (!canRunPythonScripts) {
           updateProgress(15, '使用内置 PDF 翻译引擎（纯 Node.js 无外部依赖）...');
-          pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => updateProgress(25, msg), customApi, targetLang, agentPlan);
+          pdfOut = await translatePdf(file.buffer, translateRunner, (msg) => { console.log(`[PDF] ${msg}`); }, customApi, targetLang, agentPlan, updateProgress);
         } else {
           // Python available: run unified workflow (逐 span API 翻译 + 白底黑字精确覆盖 + 术语修正)
           try {

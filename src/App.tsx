@@ -806,7 +806,7 @@ const syncSourceDir = (fileList: File[]) => {
   const buildAgentPlanPayload = () => {
   const plan = planAgentAllocation({
   totalItems: files.length > 1 ? files.length : Math.max(originalParagraphs.length, files.length || 1),
-  batchSize: isInteractiveMode ? 40 : 2,
+  batchSize: 40,
   maxExecutors: agentMaxExecutors,
   enableProofreader: true,
   roleApi: resolveAgentRoleApis(),
