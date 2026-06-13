@@ -2040,7 +2040,7 @@ function detectLanguage(text: string): string {
  formData.append('customBaseUrl', customApi.baseUrl);
  formData.append('customModel', customApi.model);
  }
-        formData.append('glossaryTerms', JSON.stringify(glossaryTermsForFormData));
+        formData.append('glossaryTerms', JSON.stringify(await getActiveGlossaryTerms()));
 
         // When agent orchestration is enabled, use the full payload (with enabled + modelProfiles)
         // so that the standard translation path also runs Planner → Executor → Reviewer.
