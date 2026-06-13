@@ -1961,9 +1961,28 @@ function detectLanguage(text: string): string {
   };
 
   // Translation Trigger Action
-  const handleTranslate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!file) return;
+  const handleTranslate = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    console.log('[handleTranslate] entry | file=', file?.name, '| files.length=', files.length, '| isInteractiveMode=', isInteractiveMode, '| agentOrchestrationEnabled=', agentOrchestrationEnabled, '| isTranslating=', isTranslating);
+
+    // When multi-agent orchestration is enabled, force Direct mode (not Babel/Interactive).
+    // Babel mode only does DOM parsing; it never calls /api/translate, so the
+    // Planner→Executor→Reviewer pipeline would never fire.
+    if (agentOrchestrationEnabled && isInteractiveMode) {
+      console.log('[handleTranslate] agentOrchestration on + Babel mode → auto-switching to Direct');
+      setIsInteractiveMode(false);
+      // Defer to next tick so React state settles, then re-enter
+      setTimeout(() => handleTranslate(), 0);
+      return;
+    }
+
+    if (!file) {
+      console.warn('[handleTranslate] file is null — aborting');
+      setErrorMessage(currentLang === 'zh'
+        ? '未检测到有效文件，请重新拖入或上传文档后再点击翻译。'
+        : 'No valid file detected. Please re-upload your document before translating.');
+      return;
+    }
     if (file.size === 0) {
       setErrorMessage(currentLang === 'zh'
         ? '💡 当前处于历史记录载入状态，不具有本地原始物理文件。请在上方点击重新拖入/上传您的原始文档再开始全新翻译。'
