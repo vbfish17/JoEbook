@@ -677,7 +677,13 @@ CRITICAL RULES:
   const buildTranslateGemmaPrompt = (text: string) => `<<<source>>>${sourceText}<<<target>>>${targetLang}<<<text>>>${text}`;
 
   const parseTranslateGemmaBatch = (content: string): string[] => {
-    const cleaned = content.trim().replace(/^```[a-zA-Z]*\s*/i, '').replace(/\s*```$/i, '').trim();
+    // Strip any residual TranslateGemma format markers that the model
+    // may leak into its output (<<<translation>>>, <<<source>>>, etc.)
+    let cleaned = content.trim()
+      .replace(/^```[a-zA-Z]*\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .replace(/<<<[a-zA-Z_]+>>>/g, '')
+      .trim();
     const segments = cleaned
       .split(/\n\s*<<<end>>>\s*\n|\n\s*---\s*\n|\n{2,}/)
       .map(s => s.trim())
@@ -766,12 +772,12 @@ CRITICAL RULES:
           // ── 术语记忆提示（TranslateGemma 模式） ──
           let glossaryHint = '';
           if (glossaryTerms && glossaryTerms.length > 0) {
-            const mappings = glossaryTerms.map(t => `${t.source} → ${t.target}`).join(', ');
-            glossaryHint = ` [TERMINOLOGY: You MUST use these term mappings: ${mappings}]`;
+            const mappings = glossaryTerms.slice(0, 15).map(t => `${t.source} → ${t.target}`).join(', ');
+            glossaryHint = ` [TERMS: ${mappings}]`;
           }
 
           for (const text of texts) {
-            const promptText = `Translate strictly and return only the final translation with no explanation.${glossaryHint} ${buildTranslateGemmaPrompt(text)}`;
+            const promptText = `${buildTranslateGemmaPrompt(text)}${glossaryHint}`;
             const bodyObj = {
               model,
               messages: [
@@ -781,7 +787,7 @@ CRITICAL RULES:
                 }
               ],
               temperature: 0,
-              max_tokens: 512
+              max_tokens: 4096
             };
 
             console.log('[TranslateGemma] request text', text);
