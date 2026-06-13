@@ -820,6 +820,14 @@ const syncSourceDir = (fileList: File[]) => {
   const p = getModelProfileById(agentRoleProfileIds[role]) || getModelProfileById(defaultModelProfileId);
   if (p) {
   resolvedProfiles[role] = { apiKey: p.apiKey || '', baseUrl: p.baseUrl || '', model: p.model || '' };
+  } else {
+  // Fallback: use the current customApi from the UI so roles never ship as null.
+  // This ensures multi-agent orchestration works even without saved model profiles.
+  resolvedProfiles[role] = {
+  apiKey: customApi.apiKey || 'not-required',
+  baseUrl: customApi.baseUrl || '',
+  model: customApi.model || '',
+  };
   }
   }
   return {
@@ -2025,10 +2033,16 @@ function detectLanguage(text: string): string {
         }
 
       try {
+        // Add 30s connection timeout so stuck requests surface as errors
+        // instead of leaving the progress bar frozen at 0% indefinitely.
+        const controller = new AbortController();
+        const connectTimeout = setTimeout(() => controller.abort(), 30000);
         const response = await fetch('/api/translate', {
           method: 'POST',
-          body: formData
+          body: formData,
+          signal: controller.signal,
         });
+        clearTimeout(connectTimeout);
 
         if (!response.ok) {
           clearInterval(progressPollingRef.current);
@@ -2053,9 +2067,14 @@ function detectLanguage(text: string): string {
         }
       } catch (err: any) {
         console.error(err);
-        const fallbackMessage = currentLang === 'zh'
-          ? '请求失败。请检查服务是否已启动、端口是否可达（当前默认 7050），以及网络/接口配置是否正常。'
-          : 'Request failed. Please verify that the service is running, port 7050 is reachable, and your network/provider settings are correct.';
+        const isAbort = err?.name === 'AbortError';
+        const fallbackMessage = isAbort
+          ? (currentLang === 'zh'
+            ? '翻译请求超时（30秒无响应）。后端服务可能未启动或已崩溃——若使用 DMG 桌面端，请尝试重启应用。'
+            : 'Translation request timed out (30s). The backend may not be running — try restarting the DMG app.')
+          : (currentLang === 'zh'
+            ? '请求失败。请检查服务是否已启动、端口是否可达（当前默认 7050），以及网络/接口配置是否正常。'
+            : 'Request failed. Please verify that the service is running, port 7050 is reachable, and your network/provider settings are correct.');
         const message = !err?.message || err.message === 'Failed to fetch' ? fallbackMessage : err.message;
         setErrorMessage(message);
         clearInterval(progressPollingRef.current);

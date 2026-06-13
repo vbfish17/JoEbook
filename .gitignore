@@ -14,3 +14,4 @@ samples/
 test_*.ts
 test_*.mjs
 PROGRESS.md
+dist/

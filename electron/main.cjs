@@ -6,6 +6,26 @@ const { fork } = require('child_process');
 let serverProcess = null;
 let mainWindow = null;
 
+// Resolve real filesystem path for asar-unpacked resources.
+// Electron bundles app code into app.asar, but fork() creates a standard
+// Node.js child process that cannot read the .asar virtual filesystem.
+function realScriptPath(p) {
+  if (p.includes('app.asar')) {
+    const unpacked = p.replace('app.asar', 'app.asar.unpacked');
+    if (fs.existsSync(unpacked)) return unpacked;
+  }
+  return p;
+}
+
+function realAppRoot() {
+  const appRoot = path.join(__dirname, '..');
+  if (appRoot.includes('app.asar')) {
+    const unpacked = appRoot.replace('app.asar', 'app.asar.unpacked');
+    if (fs.existsSync(path.join(unpacked, 'dist', 'server.cjs'))) return unpacked;
+  }
+  return appRoot;
+}
+
 // IPC: Save path management
 let userSavePath = '';
 let sourceDir = ''; // auto-detected from source file (DMG only)
@@ -52,17 +72,37 @@ ipcMain.handle('select-directory', async () => {
 });
 
 function startServer() {
-  // Spawn the compiled Express standalone server as a fork child process
-  const serverPath = path.join(__dirname, '..', 'dist', 'server.cjs');
+  // Spawn the compiled Express standalone server as a fork child process.
+  //
+  // KEY INSIGHT: Electron's fork() creates a standard Node.js child process
+  // that cannot read from the .asar virtual filesystem. To work around this:
+  // 1. "dist/**/*" is in asarUnpack so server.cjs + frontend assets live on
+  //    the real filesystem under app.asar.unpacked/dist/.
+  // 2. We use realAppRoot() to resolve the real filesystem path for server.cjs.
+  // 3. We set NODE_PATH to BOTH unpacked node_modules AND asar node_modules.
+  //    - unpacked: has native modules (@napi-rs/canvas, lightningcss, etc.)
+  //    - asar: has all JS modules (express, jszip, multer, etc.)
+  //    Electron's built-in Node.js in the fork'd child CAN resolve .asar
+  //    paths because it inherits Electron's asar-aware require() patches.
+  const appRoot = realAppRoot();
+  const serverPath = path.join(appRoot, 'dist', 'server.cjs');
   
-  // Set production environment variables
+  // NODE_PATH: combine unpacked + asar node_modules
+  const asarRoot = path.join(__dirname, '..');
+  const unpackedModules = path.join(appRoot, 'node_modules');
+  const asarModules = path.join(asarRoot, 'node_modules');
+  const nodePath = [unpackedModules, asarModules].join(path.delimiter);
+
   const env = { 
     ...process.env, 
     NODE_ENV: 'production',
-    PORT: '7050'
+    PORT: '7050',
+    NODE_PATH: nodePath,
   };
 
   console.log('Spawning JoEbook local background server:', serverPath);
+  console.log('[startServer] appRoot:', appRoot);
+  console.log('[startServer] NODE_PATH:', nodePath);
   serverProcess = fork(serverPath, [], { env, silent: false });
 
   serverProcess.on('error', (err) => {
