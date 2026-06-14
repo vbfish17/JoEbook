@@ -651,7 +651,11 @@ export async function translateTextBatch(
   const normalizedBaseUrl = (customApi?.baseUrl || '').toLowerCase();
   const isLmStudio = normalizedBaseUrl.includes('localhost:1234') || normalizedBaseUrl.includes('127.0.0.1:1234') || normalizedBaseUrl.includes('lmstudio');
   const isTranslateGemma = normalizedModel.includes('translategemma');
-  const useTranslateGemmaMode = isLmStudio && isTranslateGemma;
+  // TranslateGemma <<<source>>> mode is DEPRECATED — LM Studio does not support
+  // this prompt format under /v1/chat/completions. All models now use the standard
+  // JSON batch translation path, which works reliably with any OpenAI-compatible
+  // endpoint including LM Studio.
+  const useTranslateGemmaMode = false;
 
   const systemInstruction = useTranslateGemmaMode
     ? ''
@@ -663,8 +667,10 @@ CRITICAL RULES:
 1. You MUST return translations inside a valid JSON object matching the requested schema.
 2. The number of translation strings in the returned "translations" array MUST be exactly identical to the input list (${texts.length} items).
 3. Keep all technical terms, markup tags, HTML sub-elements, inline style tokens, variables, or braces (e.g. {1}) exactly as they are. Translate only the surrounding natural text.
+   IMPORTANT: HTML inline tags like <b>, </b>, <i>, </i>, <em>, </em>, <a>, </a>, <span>, </span> MUST be preserved exactly. Every opening tag MUST have a matching closing tag. NEVER drop, split, or misplace closing tags. NEVER translate text inside tag attributes.
 4. If a block consists entirely of numbers, code syntax, empty spaces, or placeholder characters, return it unchanged.
-5. Return ONLY the JSON response - do not decorate it with markdown codeblocks or other chat text.`;
+5. Return ONLY the JSON response - do not decorate it with markdown codeblocks or other chat text.
+6. NEVER add commentary, evaluation notes, or meta-remarks (e.g. "已准确翻译", "无需修改") in the translation output — every string must contain translated text only.`;
 
   // ── 术语记忆注入：如果有术语表，追加到 systemInstruction ──
   let finalSystemInstruction = systemInstruction;
@@ -1271,6 +1277,160 @@ async function translatePptx(
 }
 
 // 4. EPUB Translator
+
+/**
+ * Fix mismatched HTML inline tags in translated EPUB content.
+ * LLM translations often break inline tag structure (e.g. <b> without </b>,
+ * or </i> without matching <i>). This function:
+ * 1. Extracts the tag skeleton from the source innerHtml
+ * 2. Validates the translated output has the same tag structure
+ * 3. If tags are broken, reconstructs: strip all inline tags from translation,
+ *    then re-apply the source tag skeleton at the same character-ratio positions
+ */
+function fixInlineHtmlTags(sourceInnerHtml: string, translatedHtml: string): string {
+  // Quick check: if no inline tags in source, just ensure translation is clean
+  const inlineTagRe = /<(b|i|em|strong|a|span)\b[^>]*>.*?<\/\1>/gis;
+  const selfClosingRe = /<(img|br|hr|input)\b[^>]*\/?>/gi;
+  
+  // Extract source tag skeleton: list of {tag, attribs, openPos, closePos, content}
+  const srcTags: {tag: string; attribs: string; fullOpen: string; fullClose: string}[] = [];
+  const srcTagRe = /<(b|i|em|strong|a|span)\b([^>]*?)>([\s\S]*?)<\/\1>/gi;
+  let m;
+  while ((m = srcTagRe.exec(sourceInnerHtml)) !== null) {
+    srcTags.push({
+      tag: m[1].toLowerCase(),
+      attribs: m[2],
+      fullOpen: m[0].substring(0, m[0].indexOf('>') + 1),
+      fullClose: `</${m[1].toLowerCase()}>`
+    });
+  }
+  
+  if (srcTags.length === 0) return translatedHtml; // No inline tags in source, nothing to fix
+  
+  // Validate translated HTML: count opens vs closes for each tag type
+  type TagCounts = Record<string, {opens: number; closes: number}>;
+  const srcCounts: TagCounts = {};
+  const trCounts: TagCounts = {};
+  
+  for (const t of srcTags) {
+    srcCounts[t.tag] = srcCounts[t.tag] || {opens: 0, closes: 0};
+    srcCounts[t.tag].opens++;
+    srcCounts[t.tag].closes++;
+  }
+  
+  const trTagRe = /<(b|i|em|strong|a|span)\b[^>]*>|<\/(b|i|em|strong|a|span)>/gi;
+  let tm;
+  while ((tm = trTagRe.exec(translatedHtml)) !== null) {
+    const tagName = (tm[1] || tm[2]).toLowerCase();
+    trCounts[tagName] = trCounts[tagName] || {opens: 0, closes: 0};
+    if (tm[1]) trCounts[tagName].opens++;
+    else trCounts[tagName].closes++;
+  }
+  
+  // Check if all tag counts match
+  let tagsMatch = true;
+  for (const tag of Object.keys(srcCounts)) {
+    if (!trCounts[tag] || trCounts[tag].opens !== srcCounts[tag].opens || trCounts[tag].closes !== srcCounts[tag].closes) {
+      tagsMatch = false;
+      break;
+    }
+  }
+  
+  if (tagsMatch) {
+    // Additional validation: try to parse the translated HTML to ensure well-formedness
+    // by checking that no unclosed tags remain
+    for (const tag of Object.keys(trCounts)) {
+      const opens = trCounts[tag]?.opens || 0;
+      const closes = trCounts[tag]?.closes || 0;
+      if (opens !== closes) { tagsMatch = false; break; }
+    }
+  }
+  
+  if (tagsMatch) return translatedHtml; // Tags are intact, no fix needed
+  
+  // Need to fix: strip all inline tags from translation text, then re-wrap
+  // using the source tag skeleton at proportional positions
+  console.warn(`[fixInlineHtmlTags] Tag mismatch detected. Source tags: ${JSON.stringify(srcCounts)}, Translated tags: ${JSON.stringify(trCounts)}. Re-applying source tag skeleton.`);
+  
+  // Strip all inline tags from translated content (keep self-closing like <img>)
+  let cleanText = translatedHtml.replace(/<\/?(b|i|em|strong|a|span)\b[^>]*>/gi, '');
+  
+  // Re-apply source tag skeleton at proportional positions
+  // For each source tag, calculate where it should wrap in the translated text
+  // based on character-ratio from source
+  const srcTextOnly = sourceInnerHtml.replace(/<\/?(?:b|i|em|strong|a|span)\b[^>]*>/gi, '');
+  const srcTextLen = srcTextOnly.length;
+  const trTextLen = cleanText.length;
+  
+  // Re-apply tags: for each source inline tag pair, find proportional position
+  // Sort source tags by their position in the source text
+  const srcTagPositions: {tag: string; attribs: string; fullOpen: string; fullClose: string; openRatio: number; closeRatio: number}[] = [];
+  
+  let srcTextPos = 0;
+  const srcParts = sourceInnerHtml.split(/(<\/?(?:b|i|em|strong|a|span)\b[^>]*>)/gi);
+  let currentTags: string[] = []; // Stack of currently open inline tags
+  
+  // Walk through source HTML to map tag positions to plain-text character positions
+  let plainTextIdx = 0;
+  for (const part of srcParts) {
+    const openMatch = part.match(/^<(b|i|em|strong|a|span)\b([^>]*?)>$/i);
+    const closeMatch = part.match(/^<\/(b|i|em|strong|a|span)>$/i);
+    
+    if (openMatch) {
+      const tag = openMatch[1].toLowerCase();
+      // Record this tag opens at current plainTextIdx
+      srcTagPositions.push({
+        tag,
+        attribs: openMatch[2],
+        fullOpen: part,
+        fullClose: `</${tag}>`,
+        openRatio: srcTextLen > 0 ? plainTextIdx / srcTextLen : 0,
+        closeRatio: -1 // will be filled when we find the matching close
+      });
+      currentTags.push(tag);
+    } else if (closeMatch) {
+      const tag = closeMatch[1].toLowerCase();
+      // Find the last unclosed position entry for this tag
+      for (let i = srcTagPositions.length - 1; i >= 0; i--) {
+        if (srcTagPositions[i].tag === tag && srcTagPositions[i].closeRatio === -1) {
+          srcTagPositions[i].closeRatio = srcTextLen > 0 ? plainTextIdx / srcTextLen : 0;
+          break;
+        }
+      }
+      currentTags = currentTags.filter((t, idx) => idx !== currentTags.lastIndexOf(tag));
+    } else {
+      plainTextIdx += part.length;
+    }
+  }
+  
+  // Fill any still-unclosed tags (edge case: tag wraps to end of text)
+  for (const tp of srcTagPositions) {
+    if (tp.closeRatio === -1) tp.closeRatio = 1.0;
+  }
+  
+  // Now apply tags to translated plain text at proportional positions
+  // Process from last to first (to avoid position shifting)
+  const insertions: {pos: number; text: string}[] = [];
+  
+  for (const tp of srcTagPositions) {
+    const openPos = Math.round(tp.openRatio * trTextLen);
+    const closePos = Math.round(tp.closeRatio * trTextLen);
+    insertions.push({pos: closePos, text: tp.fullClose});
+    insertions.push({pos: openPos, text: tp.fullOpen});
+  }
+  
+  // Sort by position descending (so we insert from end to start, avoiding offset shifts)
+  insertions.sort((a, b) => b.pos - a.pos);
+  
+  let result = cleanText;
+  for (const ins of insertions) {
+    const clampedPos = Math.min(ins.pos, result.length);
+    result = result.substring(0, clampedPos) + ins.text + result.substring(clampedPos);
+  }
+  
+  return result;
+}
+
 async function translateEpub(
   fileBuffer: Buffer,
   translateFn: (texts: string[]) => Promise<string[]>,
@@ -1352,7 +1512,11 @@ async function translateEpub(
       const record = translateList.find(r => r.fileIndex === fileIdx && r.eleIndex === eleIdx);
       
       if (record) {
-        const translatedHtmlVal = translations[record.originIdx];
+        let translatedHtmlVal = translations[record.originIdx];
+        
+        // Fix broken inline HTML tags (LLM often drops or misplaces closing tags)
+        translatedHtmlVal = fixInlineHtmlTags(ele.innerHtml, translatedHtmlVal);
+        
         const tagMatch = ele.fullTag.match(/^<([a-zA-Z1-6]+)\b([^>]*?)>([\s\S]*?)<\/\1>$/i);
         
         if (tagMatch) {
@@ -1780,6 +1944,21 @@ app.post('/api/translate', upload.single('file'), async (req, res): Promise<any>
  }
  }
   // [translateRunner] batch I/O logging suppressed for performance
+  // Global anti-leakage filter: catch any remaining LLM meta-commentary that slipped through
+  const META_COMMENTARY_GLOBAL = /[\(（]\s*此段落已(?:准确)?翻译[^\)）]*[\)）]|无需修改|已准确翻译/g;
+  translated = translated.map(t => {
+    // Filter meta-commentary
+    let cleaned = t.replace(META_COMMENTARY_GLOBAL, '').trim();
+    // Filter leaked proofreader/reviewer format: "[N] Source: ... Translation: actual text"
+    // When proofreader returns non-JSON numbered format, the entire string including "Source:" 
+    // and "Translation:" can get embedded as a single correction string
+    const leakedFormatMatch = cleaned.match(/^\[[\d]+\]\s*Source:\s*[\s\S]*?\n\s*Translation:\s*([\s\S]*)$/i);
+    if (leakedFormatMatch) {
+      const extracted = leakedFormatMatch[1].trim();
+      if (extracted) cleaned = extracted;
+    }
+    return cleaned || t;
+  });
   return translated;
  };
 
@@ -2172,29 +2351,50 @@ async function proofreadBatch(
   const systemPrompt = `You are a professional translation proofreader. Review translated text segments and correct any errors. Rules:
 1. Fix translation inaccuracies, missing terms, or grammar errors
 2. Ensure terminology matches the specified mappings exactly — this is the HIGHEST priority
-3. If a translation is already correct, return it unchanged
-4. Output ONLY valid JSON: { "corrections": [string, string, ...] } — array must be exactly ${originalTexts.length} items${glossarySection}`;
+3. If a translation is already correct, simply repeat it verbatim in the output array — do NOT add any commentary, notes, or meta-remarks such as "已准确翻译" or "无需修改"
+4. Output ONLY valid JSON: { "corrections": [string, string, ...] } — array must be exactly ${originalTexts.length} items
+5. NEVER include any evaluation comments, status notes, or non-translation text in the corrections array — every item MUST be a translated text string only${glossarySection}`;
 
-  const userPrompt = `Review these ${originalTexts.length} translation pairs:\n${originalTexts.slice(0, 30).map((src, i) => `[${i + 1}] Source: ${src}\n    Translation: ${translatedTexts[i]}`).join('\n')}${originalTexts.length > 30 ? `\n... and ${originalTexts.length - 30} more pairs` : ''}\n\nReturn a JSON object with key "corrections" containing an array of corrected translations (same length as input). If a translation is already correct, return it unchanged.`;
+  const userPrompt = `Review these ${originalTexts.length} translation pairs:\n${originalTexts.slice(0, 30).map((src, i) => `[${i + 1}] Source: ${src}\n    Translation: ${translatedTexts[i]}`).join('\n')}${originalTexts.length > 30 ? `\n... and ${originalTexts.length - 30} more pairs` : ''}\n\nReturn a JSON object with key "corrections" containing an array of corrected translations (same length as input). If a translation is already correct, repeat the translated text verbatim. NEVER write evaluation comments like "已准确翻译" or "无需修改" — only put actual translated text strings in the array.`;
 
  try {
  const result = await callLLM(customApi, systemPrompt, userPrompt, 0.1);
  if (!result) return translatedTexts;
  const cleaned = result.replace(/^```[a-zA-Z]*\n?/i, '').replace(/\n?```$/i, '').trim();
  
+ // Anti-leakage filter: strip LLM meta-commentary that should never appear in translated output
+ // Models sometimes emit evaluation notes like "此段落已准确翻译，无需修改" instead of the translation
+ const META_COMMENTARY_RE = /[\(（]\s*此段落已(?:准确)?翻译[^\)）]*[\)）]|无需修改|已准确翻译/g;
+ const filterMetaCommentary = (text: string): string => {
+   let cleaned = text.replace(META_COMMENTARY_RE, '').trim();
+   // Also strip leaked proofreader format: "[N] Source: ... Translation: actual text"
+   const leakedFormatMatch = cleaned.match(/^\[[\d]+\]\s*Source:\s*[\s\S]*?\n\s*Translation:\s*([\s\S]*)$/i);
+   if (leakedFormatMatch) {
+     const extracted = leakedFormatMatch[1].trim();
+     if (extracted) cleaned = extracted;
+   }
+   return cleaned;
+ };
+ 
  // Try JSON parse first
  try {
  const parsed = JSON.parse(cleaned);
  if (Array.isArray(parsed.corrections) && parsed.corrections.length === translatedTexts.length) {
- return parsed.corrections.map((c: any, i: number) => String(c || translatedTexts[i]));
+   return parsed.corrections.map((c: any, i: number) => {
+     const filtered = filterMetaCommentary(String(c || ''));
+     return filtered || translatedTexts[i];
+   });
  }
  // Partial array match
  if (Array.isArray(parsed.corrections) && parsed.corrections.length > 0) {
- return translatedTexts.map((orig, i) => {
- const c = parsed.corrections[i];
- if (c && typeof c === 'string' && c.trim()) return c;
- return orig;
- });
+   return translatedTexts.map((orig, i) => {
+     const c = parsed.corrections[i];
+     if (c && typeof c === 'string' && c.trim()) {
+       const filtered = filterMetaCommentary(c);
+       return filtered || orig;
+     }
+     return orig;
+   });
  }
  } catch (jsonErr) {
  // JSON parse failed — model may have returned non-JSON format
@@ -2206,7 +2406,7 @@ async function proofreadBatch(
  const extracted: string[] = [];
  let match;
  while ((match = translationPattern.exec(cleaned)) !== null) {
- const t = match[1].trim();
+ const t = filterMetaCommentary(match[1].trim());
  if (t) extracted.push(t);
  }
  if (extracted.length === translatedTexts.length) {
